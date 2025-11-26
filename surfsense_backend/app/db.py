@@ -9,6 +9,7 @@ from sqlalchemy import (
     ARRAY,
     JSON,
     TIMESTAMP,
+    BigInteger,
     Boolean,
     Column,
     Enum as SQLAlchemyEnum,
@@ -50,6 +51,7 @@ class DocumentType(str, Enum):
     GOOGLE_GMAIL_CONNECTOR = "GOOGLE_GMAIL_CONNECTOR"
     AIRTABLE_CONNECTOR = "AIRTABLE_CONNECTOR"
     LUMA_CONNECTOR = "LUMA_CONNECTOR"
+    ELASTICSEARCH_CONNECTOR = "ELASTICSEARCH_CONNECTOR"
 
 
 class SearchSourceConnectorType(str, Enum):
@@ -70,49 +72,47 @@ class SearchSourceConnectorType(str, Enum):
     GOOGLE_GMAIL_CONNECTOR = "GOOGLE_GMAIL_CONNECTOR"
     AIRTABLE_CONNECTOR = "AIRTABLE_CONNECTOR"
     LUMA_CONNECTOR = "LUMA_CONNECTOR"
+    ELASTICSEARCH_CONNECTOR = "ELASTICSEARCH_CONNECTOR"
 
 
 class ChatType(str, Enum):
     QNA = "QNA"
-    REPORT_GENERAL = "REPORT_GENERAL"
-    REPORT_DEEP = "REPORT_DEEP"
-    REPORT_DEEPER = "REPORT_DEEPER"
 
 
 class LiteLLMProvider(str, Enum):
     """
     Enum for LLM providers supported by LiteLLM.
-    LiteLLM 支持的 LLM 提供商枚举。
     """
 
     OPENAI = "OPENAI"
     ANTHROPIC = "ANTHROPIC"
+    GOOGLE = "GOOGLE"
+    AZURE_OPENAI = "AZURE_OPENAI"
+    BEDROCK = "BEDROCK"
+    VERTEX_AI = "VERTEX_AI"
     GROQ = "GROQ"
     COHERE = "COHERE"
-    HUGGINGFACE = "HUGGINGFACE"
-    AZURE_OPENAI = "AZURE_OPENAI"
-    GOOGLE = "GOOGLE"
-    AWS_BEDROCK = "AWS_BEDROCK"
-    OLLAMA = "OLLAMA"
     MISTRAL = "MISTRAL"
-    TOGETHER_AI = "TOGETHER_AI"
-    OPENROUTER = "OPENROUTER"
-    REPLICATE = "REPLICATE"
-    PALM = "PALM"
-    VERTEX_AI = "VERTEX_AI"
-    ANYSCALE = "ANYSCALE"
-    PERPLEXITY = "PERPLEXITY"
-    DEEPINFRA = "DEEPINFRA"
-    AI21 = "AI21"
-    NLPCLOUD = "NLPCLOUD"
-    ALEPH_ALPHA = "ALEPH_ALPHA"
-    PETALS = "PETALS"
-    COMETAPI = "COMETAPI"
-    # Chinese LLM Providers (OpenAI-compatible)
     DEEPSEEK = "DEEPSEEK"
+    XAI = "XAI"
+    OPENROUTER = "OPENROUTER"
+    TOGETHER_AI = "TOGETHER_AI"
+    FIREWORKS_AI = "FIREWORKS_AI"
+    REPLICATE = "REPLICATE"
+    PERPLEXITY = "PERPLEXITY"
+    OLLAMA = "OLLAMA"
     ALIBABA_QWEN = "ALIBABA_QWEN"
     MOONSHOT = "MOONSHOT"
     ZHIPU = "ZHIPU"
+    ANYSCALE = "ANYSCALE"
+    DEEPINFRA = "DEEPINFRA"
+    CEREBRAS = "CEREBRAS"
+    SAMBANOVA = "SAMBANOVA"
+    AI21 = "AI21"
+    CLOUDFLARE = "CLOUDFLARE"
+    DATABRICKS = "DATABRICKS"
+    COMETAPI = "COMETAPI"
+    HUGGINGFACE = "HUGGINGFACE"
     CUSTOM = "CUSTOM"
 
 
@@ -159,6 +159,7 @@ class Chat(BaseModel, TimestampMixin):
     title = Column(String, nullable=False, index=True)
     initial_connectors = Column(ARRAY(String), nullable=True)
     messages = Column(JSON, nullable=False)
+    state_version = Column(BigInteger, nullable=False, default=1)
 
     search_space_id = Column(
         Integer, ForeignKey("searchspaces.id", ondelete="CASCADE"), nullable=False
@@ -205,6 +206,10 @@ class Podcast(BaseModel, TimestampMixin):
     title = Column(String, nullable=False, index=True)
     podcast_transcript = Column(JSON, nullable=False, default={})
     file_location = Column(String(500), nullable=False, default="")
+    chat_id = Column(
+        Integer, ForeignKey("chats.id", ondelete="CASCADE"), nullable=True
+    )  # If generated from a chat, this will be the chat id, else null ( can be from a document or a chat )
+    chat_state_version = Column(BigInteger, nullable=True)
 
     search_space_id = Column(
         Integer, ForeignKey("searchspaces.id", ondelete="CASCADE"), nullable=False
@@ -218,6 +223,12 @@ class SearchSpace(BaseModel, TimestampMixin):
     name = Column(String(100), nullable=False, index=True)
     description = Column(String(500), nullable=True)
 
+    citations_enabled = Column(
+        Boolean, nullable=False, default=True
+    )  # Enable/disable citations
+    qna_custom_instructions = Column(
+        Text, nullable=True, default=""
+    )  # User's custom instructions
     user_id = Column(
         UUID(as_uuid=True), ForeignKey("user.id", ondelete="CASCADE"), nullable=False
     )
@@ -283,6 +294,11 @@ class SearchSourceConnector(BaseModel, TimestampMixin):
     last_indexed_at = Column(TIMESTAMP(timezone=True), nullable=True)
     config = Column(JSON, nullable=False)
 
+    # Periodic indexing fields
+    periodic_indexing_enabled = Column(Boolean, nullable=False, default=False)
+    indexing_frequency_minutes = Column(Integer, nullable=True)
+    next_scheduled_at = Column(TIMESTAMP(timezone=True), nullable=True)
+
     search_space_id = Column(
         Integer, ForeignKey("searchspaces.id", ondelete="CASCADE"), nullable=False
     )
@@ -338,15 +354,11 @@ class UserSearchSpacePreference(BaseModel, TimestampMixin):
     )
 
     # User-specific LLM preferences for this search space
-    long_context_llm_id = Column(
-        Integer, ForeignKey("llm_configs.id", ondelete="SET NULL"), nullable=True
-    )
-    fast_llm_id = Column(
-        Integer, ForeignKey("llm_configs.id", ondelete="SET NULL"), nullable=True
-    )
-    strategic_llm_id = Column(
-        Integer, ForeignKey("llm_configs.id", ondelete="SET NULL"), nullable=True
-    )
+    # Note: These can be negative IDs for global configs (from YAML) or positive IDs for custom configs (from DB)
+    # Foreign keys removed to support global configs with negative IDs
+    long_context_llm_id = Column(Integer, nullable=True)
+    fast_llm_id = Column(Integer, nullable=True)
+    strategic_llm_id = Column(Integer, nullable=True)
 
     # Future RBAC fields can be added here
     # role = Column(String(50), nullable=True)  # e.g., 'owner', 'editor', 'viewer'
@@ -355,13 +367,12 @@ class UserSearchSpacePreference(BaseModel, TimestampMixin):
     user = relationship("User", back_populates="search_space_preferences")
     search_space = relationship("SearchSpace", back_populates="user_preferences")
 
-    long_context_llm = relationship(
-        "LLMConfig", foreign_keys=[long_context_llm_id], post_update=True
-    )
-    fast_llm = relationship("LLMConfig", foreign_keys=[fast_llm_id], post_update=True)
-    strategic_llm = relationship(
-        "LLMConfig", foreign_keys=[strategic_llm_id], post_update=True
-    )
+    # Note: Relationships removed because foreign keys no longer exist
+    # Global configs (negative IDs) don't exist in llm_configs table
+    # Application code manually fetches configs when needed
+    # long_context_llm = relationship("LLMConfig", foreign_keys=[long_context_llm_id], post_update=True)
+    # fast_llm = relationship("LLMConfig", foreign_keys=[fast_llm_id], post_update=True)
+    # strategic_llm = relationship("LLMConfig", foreign_keys=[strategic_llm_id], post_update=True)
 
 
 class Log(BaseModel, TimestampMixin):
@@ -397,6 +408,10 @@ if config.AUTH_TYPE == "GOOGLE":
             cascade="all, delete-orphan",
         )
 
+        # Page usage tracking for ETL services
+        pages_limit = Column(Integer, nullable=False, default=500, server_default="500")
+        pages_used = Column(Integer, nullable=False, default=0, server_default="0")
+
 else:
 
     class User(SQLAlchemyBaseUserTableUUID, Base):
@@ -406,6 +421,10 @@ else:
             back_populates="user",
             cascade="all, delete-orphan",
         )
+
+        # Page usage tracking for ETL services
+        pages_limit = Column(Integer, nullable=False, default=500, server_default="500")
+        pages_used = Column(Integer, nullable=False, default=0, server_default="0")
 
 
 engine = create_async_engine(DATABASE_URL)

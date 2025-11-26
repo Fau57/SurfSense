@@ -1,3 +1,6 @@
+from pathlib import Path
+
+import yaml
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
@@ -10,14 +13,19 @@ from app.utils.check_ownership import check_ownership
 router = APIRouter()
 
 
-@router.post("/searchspaces/", response_model=SearchSpaceRead)
+@router.post("/searchspaces", response_model=SearchSpaceRead)
 async def create_search_space(
     search_space: SearchSpaceCreate,
     session: AsyncSession = Depends(get_async_session),
     user: User = Depends(current_active_user),
 ):
     try:
-        db_search_space = SearchSpace(**search_space.model_dump(), user_id=user.id)
+        search_space_data = search_space.model_dump()
+
+        # citations_enabled defaults to True (handled by Pydantic schema)
+        # qna_custom_instructions defaults to None/empty (handled by DB)
+
+        db_search_space = SearchSpace(**search_space_data, user_id=user.id)
         session.add(db_search_space)
         await session.commit()
         await session.refresh(db_search_space)
@@ -31,7 +39,7 @@ async def create_search_space(
         ) from e
 
 
-@router.get("/searchspaces/", response_model=list[SearchSpaceRead])
+@router.get("/searchspaces", response_model=list[SearchSpaceRead])
 async def read_search_spaces(
     skip: int = 0,
     limit: int = 200,
@@ -49,6 +57,37 @@ async def read_search_spaces(
     except Exception as e:
         raise HTTPException(
             status_code=500, detail=f"Failed to fetch search spaces: {e!s}"
+        ) from e
+
+
+@router.get("/searchspaces/prompts/community")
+async def get_community_prompts():
+    """
+    Get community-curated prompts for SearchSpace System Instructions.
+    This endpoint does not require authentication as it serves public prompts.
+    """
+    try:
+        # Get the path to the prompts YAML file
+        prompts_file = (
+            Path(__file__).parent.parent
+            / "prompts"
+            / "public_search_space_prompts.yaml"
+        )
+
+        if not prompts_file.exists():
+            raise HTTPException(
+                status_code=404, detail="Community prompts file not found"
+            )
+
+        with open(prompts_file, encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+
+        return data.get("prompts", [])
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"Failed to load community prompts: {e!s}"
         ) from e
 
 

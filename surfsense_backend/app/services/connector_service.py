@@ -569,16 +569,16 @@ class ConnectorService:
     ) -> tuple:
         """
         Search using Baidu AI Search API and return both sources and documents.
-        
+
         Baidu AI Search provides intelligent search with automatic summarization.
         We extract the raw search results (references) from the API response.
-        
+
         Args:
             user_query: User's search query
             user_id: User ID
             search_space_id: Search space ID
             top_k: Maximum number of results to return
-            
+
         Returns:
             tuple: (sources_info_dict, documents_list)
         """
@@ -680,7 +680,9 @@ class ConnectorService:
                 "sources": [],
             }, []
         except Exception as exc:
-            print(f"ERROR: Unexpected error calling Baidu API: {type(exc).__name__}: {exc!r}")
+            print(
+                f"ERROR: Unexpected error calling Baidu API: {type(exc).__name__}: {exc!r}"
+            )
             print(f"Endpoint: {baidu_endpoint}")
             print(f"Payload: {payload}")
             return {
@@ -705,9 +707,11 @@ class ConnectorService:
 
         # Extract references (search results) from the response
         baidu_references = data.get("references", [])
-        
+
         if "code" in data or "message" in data:
-            print(f"WARNING: Baidu API returned error - Code: {data.get('code')}, Message: {data.get('message')}")
+            print(
+                f"WARNING: Baidu API returned error - Code: {data.get('code')}, Message: {data.get('message')}"
+            )
 
         if not baidu_references:
             print("WARNING: No references found in Baidu API response")
@@ -735,7 +739,9 @@ class ConnectorService:
                 source = {
                     "id": self.source_id_counter,
                     "title": title,
-                    "description": content[:300] if content else "",  # Limit description length
+                    "description": content[:300]
+                    if content
+                    else "",  # Limit description length
                     "url": url,
                 }
                 sources_list.append(source)
@@ -2421,3 +2427,117 @@ class ConnectorService:
         }
 
         return result_object, luma_chunks
+
+    async def search_elasticsearch(
+        self,
+        user_query: str,
+        user_id: str,
+        search_space_id: int,
+        top_k: int = 20,
+        search_mode: SearchMode = SearchMode.CHUNKS,
+    ) -> tuple:
+        """
+        Search for Elasticsearch documents and return both the source information and langchain documents
+
+        Args:
+            user_query: The user's query
+            user_id: The user's ID
+            search_space_id: The search space ID to search in
+            top_k: Maximum number of results to return
+            search_mode: Search mode (CHUNKS or DOCUMENTS)
+
+        Returns:
+            tuple: (sources_info, langchain_documents)
+        """
+        if search_mode == SearchMode.CHUNKS:
+            elasticsearch_chunks = await self.chunk_retriever.hybrid_search(
+                query_text=user_query,
+                top_k=top_k,
+                user_id=user_id,
+                search_space_id=search_space_id,
+                document_type="ELASTICSEARCH_CONNECTOR",
+            )
+        elif search_mode == SearchMode.DOCUMENTS:
+            elasticsearch_chunks = await self.document_retriever.hybrid_search(
+                query_text=user_query,
+                top_k=top_k,
+                user_id=user_id,
+                search_space_id=search_space_id,
+                document_type="ELASTICSEARCH_CONNECTOR",
+            )
+            # Transform document retriever results to match expected format
+            elasticsearch_chunks = self._transform_document_results(
+                elasticsearch_chunks
+            )
+
+        # Early return if no results
+        if not elasticsearch_chunks:
+            return {
+                "id": 34,
+                "name": "Elasticsearch",
+                "type": "ELASTICSEARCH_CONNECTOR",
+                "sources": [],
+            }, []
+
+        # Process each chunk and create sources directly without deduplication
+        sources_list = []
+        async with self.counter_lock:
+            for _i, chunk in enumerate(elasticsearch_chunks):
+                # Extract document metadata
+                document = chunk.get("document", {})
+                metadata = document.get("metadata", {})
+
+                # Extract Elasticsearch-specific metadata
+                es_id = metadata.get("elasticsearch_id", "")
+                es_index = metadata.get("elasticsearch_index", "")
+                es_score = metadata.get("elasticsearch_score", "")
+
+                # Create a more descriptive title for Elasticsearch documents
+                title = document.get("title", "Elasticsearch Document")
+                if es_index:
+                    title = f"{title} (Index: {es_index})"
+
+                # Create a more descriptive description for Elasticsearch documents
+                description = chunk.get("content", "")[:150]
+                if len(description) == 150:
+                    description += "..."
+
+                # Add Elasticsearch info to description
+                info_parts = []
+                if es_id:
+                    info_parts.append(f"ID: {es_id}")
+                if es_score:
+                    info_parts.append(f"Score: {es_score}")
+
+                if info_parts:
+                    if description:
+                        description = f"{description} | {' | '.join(info_parts)}"
+                    else:
+                        description = " | ".join(info_parts)
+
+                # For URL, we could construct a URL to view the document if we have the Elasticsearch UI URL
+                url = ""
+                # Could be extended to include Kibana or other UI URLs if configured
+
+                source = {
+                    "id": chunk.get("chunk_id", self.source_id_counter),
+                    "title": title,
+                    "description": description,
+                    "url": url,
+                    "elasticsearch_id": es_id,
+                    "elasticsearch_index": es_index,
+                    "elasticsearch_score": es_score,
+                }
+
+                self.source_id_counter += 1
+                sources_list.append(source)
+
+        # Create result object
+        result_object = {
+            "id": 34,  # Assign a unique ID for the Elasticsearch connector
+            "name": "Elasticsearch",
+            "type": "ELASTICSEARCH_CONNECTOR",
+            "sources": sources_list,
+        }
+
+        return result_object, elasticsearch_chunks

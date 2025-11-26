@@ -3,7 +3,9 @@
 import {
 	AlertCircle,
 	Bot,
+	Check,
 	CheckCircle,
+	ChevronsUpDown,
 	Clock,
 	Edit3,
 	Eye,
@@ -22,6 +24,14 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import {
+	Command,
+	CommandEmpty,
+	CommandGroup,
+	CommandInput,
+	CommandItem,
+	CommandList,
+} from "@/components/ui/command";
+import {
 	Dialog,
 	DialogContent,
 	DialogDescription,
@@ -30,6 +40,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import {
 	Select,
 	SelectContent,
@@ -38,8 +49,15 @@ import {
 	SelectValue,
 } from "@/components/ui/select";
 import { LANGUAGES } from "@/contracts/enums/languages";
+import { getModelsByProvider } from "@/contracts/enums/llm-models";
 import { LLM_PROVIDERS } from "@/contracts/enums/llm-providers";
-import { type CreateLLMConfig, type LLMConfig, useLLMConfigs } from "@/hooks/use-llm-configs";
+import {
+	type CreateLLMConfig,
+	type LLMConfig,
+	useGlobalLLMConfigs,
+	useLLMConfigs,
+} from "@/hooks/use-llm-configs";
+import { cn } from "@/lib/utils";
 import InferenceParamsEditor from "../inference-params-editor";
 
 interface ModelConfigManagerProps {
@@ -56,6 +74,7 @@ export function ModelConfigManager({ searchSpaceId }: ModelConfigManagerProps) {
 		deleteLLMConfig,
 		refreshConfigs,
 	} = useLLMConfigs(searchSpaceId);
+	const { globalConfigs } = useGlobalLLMConfigs();
 	const [isAddingNew, setIsAddingNew] = useState(false);
 	const [editingConfig, setEditingConfig] = useState<LLMConfig | null>(null);
 	const [showApiKey, setShowApiKey] = useState<Record<number, boolean>>({});
@@ -71,6 +90,7 @@ export function ModelConfigManager({ searchSpaceId }: ModelConfigManagerProps) {
 		search_space_id: searchSpaceId,
 	});
 	const [isSubmitting, setIsSubmitting] = useState(false);
+	const [modelComboboxOpen, setModelComboboxOpen] = useState(false);
 
 	// Populate form when editing
 	useEffect(() => {
@@ -93,12 +113,13 @@ export function ModelConfigManager({ searchSpaceId }: ModelConfigManagerProps) {
 		setFormData((prev) => ({ ...prev, [field]: value }));
 	};
 
-	// Handle provider change with auto-fill API Base URL / 处理 Provider 变更并自动填充 API Base URL
+	// Handle provider change with auto-fill API Base URL and reset model / 处理 Provider 变更并自动填充 API Base URL 并重置模型
 	const handleProviderChange = (providerValue: string) => {
 		const provider = LLM_PROVIDERS.find((p) => p.value === providerValue);
 		setFormData((prev) => ({
 			...prev,
 			provider: providerValue,
+			model_name: "", // Reset model when provider changes
 			// Auto-fill API Base URL if provider has a default / 如果提供商有默认值则自动填充
 			api_base: provider?.apiBase || prev.api_base,
 		}));
@@ -157,6 +178,7 @@ export function ModelConfigManager({ searchSpaceId }: ModelConfigManagerProps) {
 	};
 
 	const selectedProvider = LLM_PROVIDERS.find((p) => p.value === formData.provider);
+	const availableModels = formData.provider ? getModelsByProvider(formData.provider) : [];
 
 	const getProviderInfo = (providerValue: string) => {
 		return LLM_PROVIDERS.find((p) => p.value === providerValue);
@@ -205,6 +227,20 @@ export function ModelConfigManager({ searchSpaceId }: ModelConfigManagerProps) {
 				<Alert variant="destructive">
 					<AlertCircle className="h-4 w-4" />
 					<AlertDescription>{error}</AlertDescription>
+				</Alert>
+			)}
+
+			{/* Global Configs Info Alert */}
+			{!loading && !error && globalConfigs.length > 0 && (
+				<Alert>
+					<CheckCircle className="h-4 w-4" />
+					<AlertDescription>
+						<strong>
+							{globalConfigs.length} global configuration{globalConfigs.length > 1 ? "s" : ""}
+						</strong>{" "}
+						available for use. You can assign them in the LLM Roles tab without adding your own API
+						keys.
+					</AlertDescription>
 				</Alert>
 			)}
 
@@ -294,8 +330,7 @@ export function ModelConfigManager({ searchSpaceId }: ModelConfigManagerProps) {
 								<div className="space-y-2 mb-6">
 									<h3 className="text-xl font-semibold">No Configurations Yet</h3>
 									<p className="text-muted-foreground max-w-sm">
-										Get started by adding your first LLM provider configuration to begin using the
-										system.
+										Add your own LLM provider configurations.
 									</p>
 								</div>
 								<Button onClick={() => setIsAddingNew(true)} size="lg">
@@ -396,12 +431,14 @@ export function ModelConfigManager({ searchSpaceId }: ModelConfigManagerProps) {
 
 															{/* Metadata */}
 															<div className="flex flex-wrap items-center gap-4 pt-4 border-t border-border/50">
-																<div className="flex items-center gap-2 text-xs text-muted-foreground">
-																	<Clock className="h-3 w-3" />
-																	<span>
-																		Created {new Date(config.created_at).toLocaleDateString()}
-																	</span>
-																</div>
+																{config.created_at && (
+																	<div className="flex items-center gap-2 text-xs text-muted-foreground">
+																		<Clock className="h-3 w-3" />
+																		<span>
+																			Created {new Date(config.created_at).toLocaleDateString()}
+																		</span>
+																	</div>
+																)}
 																<div className="flex items-center gap-2 text-xs">
 																	<div className="h-2 w-2 rounded-full bg-green-500"></div>
 																	<span className="text-green-600 font-medium">Active</span>
@@ -530,18 +567,90 @@ export function ModelConfigManager({ searchSpaceId }: ModelConfigManagerProps) {
 
 						<div className="space-y-2">
 							<Label htmlFor="model_name">Model Name *</Label>
-							<Input
-								id="model_name"
-								placeholder={selectedProvider?.example || "e.g., gpt-4"}
-								value={formData.model_name}
-								onChange={(e) => handleInputChange("model_name", e.target.value)}
-								required
-							/>
-							{selectedProvider && (
-								<p className="text-xs text-muted-foreground">
-									Examples: {selectedProvider.example}
-								</p>
-							)}
+							<Popover open={modelComboboxOpen} onOpenChange={setModelComboboxOpen}>
+								<PopoverTrigger asChild>
+									<Button
+										variant="outline"
+										aria-expanded={modelComboboxOpen}
+										className="w-full justify-between font-normal"
+									>
+										<span className={cn(!formData.model_name && "text-muted-foreground")}>
+											{formData.model_name || "Select or type model name..."}
+										</span>
+										<ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+									</Button>
+								</PopoverTrigger>
+								<PopoverContent className="w-full p-0" align="start" side="bottom">
+									<Command shouldFilter={false}>
+										<CommandInput
+											placeholder={selectedProvider?.example || "Type model name..."}
+											value={formData.model_name}
+											onValueChange={(value) => handleInputChange("model_name", value)}
+										/>
+										<CommandList>
+											<CommandEmpty>
+												<div className="py-2 text-center text-sm text-muted-foreground">
+													{formData.model_name
+														? `Using custom model: "${formData.model_name}"`
+														: "Type your model name above"}
+												</div>
+											</CommandEmpty>
+											{availableModels.length > 0 && (
+												<CommandGroup heading="Suggested Models">
+													{availableModels
+														.filter(
+															(model) =>
+																!formData.model_name ||
+																model.value
+																	.toLowerCase()
+																	.includes(formData.model_name.toLowerCase()) ||
+																model.label
+																	.toLowerCase()
+																	.includes(formData.model_name.toLowerCase())
+														)
+														.map((model) => (
+															<CommandItem
+																key={model.value}
+																value={model.value}
+																onSelect={(currentValue) => {
+																	handleInputChange("model_name", currentValue);
+																	setModelComboboxOpen(false);
+																}}
+																className="flex flex-col items-start py-3"
+															>
+																<div className="flex w-full items-center">
+																	<Check
+																		className={cn(
+																			"mr-2 h-4 w-4 shrink-0",
+																			formData.model_name === model.value
+																				? "opacity-100"
+																				: "opacity-0"
+																		)}
+																	/>
+																	<div className="flex-1">
+																		<div className="font-medium">{model.label}</div>
+																		{model.contextWindow && (
+																			<div className="text-xs text-muted-foreground">
+																				Context: {model.contextWindow}
+																			</div>
+																		)}
+																	</div>
+																</div>
+															</CommandItem>
+														))}
+												</CommandGroup>
+											)}
+										</CommandList>
+									</Command>
+								</PopoverContent>
+							</Popover>
+							<p className="text-xs text-muted-foreground">
+								{availableModels.length > 0
+									? `Type freely or select from ${availableModels.length} model suggestions`
+									: selectedProvider?.example
+										? `Examples: ${selectedProvider.example}`
+										: "Type your model name freely"}
+							</p>
 						</div>
 
 						<div className="space-y-2">

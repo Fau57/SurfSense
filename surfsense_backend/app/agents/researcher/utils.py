@@ -3,25 +3,6 @@ from typing import Any, NamedTuple
 from langchain.schema import AIMessage, HumanMessage, SystemMessage
 from langchain_core.messages import BaseMessage
 from litellm import get_model_info, token_counter
-from pydantic import BaseModel, Field
-
-
-class Section(BaseModel):
-    """A section in the answer outline."""
-
-    section_id: int = Field(..., description="The zero-based index of the section")
-    section_title: str = Field(..., description="The title of the section")
-    questions: list[str] = Field(
-        ..., description="Questions to research for this section"
-    )
-
-
-class AnswerOutline(BaseModel):
-    """The complete answer outline with all sections."""
-
-    answer_outline: list[Section] = Field(
-        ..., description="List of sections in the answer outline"
-    )
 
 
 class DocumentTokenInfo(NamedTuple):
@@ -52,6 +33,7 @@ def get_connector_emoji(connector_name: str) -> str:
         "GOOGLE_CALENDAR_CONNECTOR": "📅",
         "AIRTABLE_CONNECTOR": "🗃️",
         "LUMA_CONNECTOR": "✨",
+        "ELASTICSEARCH_CONNECTOR": "⚡",
     }
     return connector_emojis.get(connector_name, "🔎")
 
@@ -76,6 +58,7 @@ def get_connector_friendly_name(connector_name: str) -> str:
         "BAIDU_SEARCH_API": "Baidu Search",
         "AIRTABLE_CONNECTOR": "Airtable",
         "LUMA_CONNECTOR": "Luma",
+        "ELASTICSEARCH_CONNECTOR": "Elasticsearch",
     }
     return connector_friendly_names.get(connector_name, connector_name)
 

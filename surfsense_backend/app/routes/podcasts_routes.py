@@ -1,7 +1,7 @@
 import os
 from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,7 +21,7 @@ from app.utils.check_ownership import check_ownership
 router = APIRouter()
 
 
-@router.post("/podcasts/", response_model=PodcastRead)
+@router.post("/podcasts", response_model=PodcastRead)
 async def create_podcast(
     podcast: PodcastCreate,
     session: AsyncSession = Depends(get_async_session),
@@ -54,7 +54,7 @@ async def create_podcast(
         ) from None
 
 
-@router.get("/podcasts/", response_model=list[PodcastRead])
+@router.get("/podcasts", response_model=list[PodcastRead])
 async def read_podcasts(
     skip: int = 0,
     limit: int = 100,
@@ -155,7 +155,11 @@ async def delete_podcast(
 
 
 async def generate_chat_podcast_with_new_session(
-    chat_id: int, search_space_id: int, podcast_title: str, user_id: int
+    chat_id: int,
+    search_space_id: int,
+    user_id: int,
+    podcast_title: str | None = None,
+    user_prompt: str | None = None,
 ):
     """Create a new session and process chat podcast generation."""
     from app.db import async_session_maker
@@ -163,7 +167,7 @@ async def generate_chat_podcast_with_new_session(
     async with async_session_maker() as session:
         try:
             await generate_chat_podcast(
-                session, chat_id, search_space_id, podcast_title, user_id
+                session, chat_id, search_space_id, user_id, podcast_title, user_prompt
             )
         except Exception as e:
             import logging
@@ -171,12 +175,11 @@ async def generate_chat_podcast_with_new_session(
             logging.error(f"Error generating podcast from chat: {e!s}")
 
 
-@router.post("/podcasts/generate/")
+@router.post("/podcasts/generate")
 async def generate_podcast(
     request: PodcastGenerateRequest,
     session: AsyncSession = Depends(get_async_session),
     user: User = Depends(current_active_user),
-    fastapi_background_tasks: BackgroundTasks = BackgroundTasks(),
 ):
     try:
         # Check if the user owns the search space
@@ -205,14 +208,18 @@ async def generate_podcast(
                     detail="One or more chat IDs do not belong to this user or search space",
                 )
 
-            # Only add a single task with the first chat ID
+            from app.tasks.celery_tasks.podcast_tasks import (
+                generate_chat_podcast_task,
+            )
+
+            # Add Celery tasks for each chat ID
             for chat_id in valid_chat_ids:
-                fastapi_background_tasks.add_task(
-                    generate_chat_podcast_with_new_session,
+                generate_chat_podcast_task.delay(
                     chat_id,
                     request.search_space_id,
-                    request.podcast_title,
                     user.id,
+                    request.podcast_title,
+                    request.user_prompt,
                 )
 
         return {
@@ -287,4 +294,28 @@ async def stream_podcast(
     except Exception as e:
         raise HTTPException(
             status_code=500, detail=f"Error streaming podcast: {e!s}"
+        ) from e
+
+
+@router.get("/podcasts/by-chat/{chat_id}", response_model=PodcastRead | None)
+async def get_podcast_by_chat_id(
+    chat_id: int,
+    session: AsyncSession = Depends(get_async_session),
+    user: User = Depends(current_active_user),
+):
+    try:
+        # Get the podcast and check if user has access
+        result = await session.execute(
+            select(Podcast)
+            .join(SearchSpace)
+            .filter(Podcast.chat_id == chat_id, SearchSpace.user_id == user.id)
+        )
+        podcast = result.scalars().first()
+
+        return podcast
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"Error fetching podcast: {e!s}"
         ) from e
