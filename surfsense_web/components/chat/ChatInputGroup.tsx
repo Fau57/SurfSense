@@ -1,9 +1,17 @@
 "use client";
 
 import { ChatInput } from "@llamaindex/chat-ui";
-import { Brain, Check, FolderOpen, Minus, Plus, Zap } from "lucide-react";
-import { useParams } from "next/navigation";
-import React, { Suspense, useCallback, useState } from "react";
+import { useAtom, useAtomValue } from "jotai";
+import { Brain, Check, FolderOpen, Minus, Plus, PlusCircle, Zap } from "lucide-react";
+import { useParams, useRouter } from "next/navigation";
+import React, { Suspense, useCallback, useMemo, useState } from "react";
+import { documentTypeCountsAtom } from "@/atoms/documents/document-query.atoms";
+import { updateLLMPreferencesMutationAtom } from "@/atoms/llm-config/llm-config-mutation.atoms";
+import {
+	globalLLMConfigsAtom,
+	llmConfigsAtom,
+	llmPreferencesAtom,
+} from "@/atoms/llm-config/llm-config-query.atoms";
 import { DocumentsDataTable } from "@/components/chat/DocumentsDataTable";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -25,9 +33,7 @@ import {
 } from "@/components/ui/select";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { getConnectorIcon } from "@/contracts/enums/connectorIcons";
-import { useDocumentTypes } from "@/hooks/use-document-types";
-import type { Document } from "@/hooks/use-documents";
-import { useGlobalLLMConfigs, useLLMConfigs, useLLMPreferences } from "@/hooks/use-llm-configs";
+import type { Document } from "@/contracts/types/document.types";
 import { useSearchSourceConnectors } from "@/hooks/use-search-source-connectors";
 
 const DocumentSelector = React.memo(
@@ -115,13 +121,27 @@ const ConnectorSelector = React.memo(
 		selectedConnectors?: string[];
 	}) => {
 		const { search_space_id } = useParams();
+		const router = useRouter();
 		const [isOpen, setIsOpen] = useState(false);
 
-		// Fetch immediately (not lazy) so the button can show the correct count
-		const { documentTypes, isLoading, isLoaded, fetchDocumentTypes } = useDocumentTypes(
-			Number(search_space_id),
-			false
-		);
+		// Use the documentTypeCountsAtom for fetching document types
+		const [documentTypeCountsQuery] = useAtom(documentTypeCountsAtom);
+		const {
+			data: documentTypeCountsData,
+			isLoading,
+			refetch: fetchDocumentTypes,
+		} = documentTypeCountsQuery;
+
+		// Transform the response into the expected format
+		const documentTypes = useMemo(() => {
+			if (!documentTypeCountsData) return [];
+			return Object.entries(documentTypeCountsData).map(([type, count]) => ({
+				type,
+				count,
+			}));
+		}, [documentTypeCountsData]);
+
+		const isLoaded = !!documentTypeCountsData;
 
 		// Fetch live search connectors immediately (non-indexable)
 		const {
@@ -247,9 +267,19 @@ const ConnectorSelector = React.memo(
 									<Brain className="h-8 w-8 text-muted-foreground" />
 								</div>
 								<h4 className="text-sm font-medium mb-1">No sources found</h4>
-								<p className="text-xs text-muted-foreground max-w-xs">
+								<p className="text-xs text-muted-foreground max-w-xs mb-4">
 									Add documents or configure search connectors for this search space
 								</p>
+								<Button
+									onClick={() => {
+										setIsOpen(false);
+										router.push(`/dashboard/${search_space_id}/sources/add`);
+									}}
+									className="gap-2"
+								>
+									<PlusCircle className="h-4 w-4" />
+									Add Sources
+								</Button>
 							</div>
 						) : (
 							<>
@@ -397,58 +427,6 @@ const ConnectorSelector = React.memo(
 
 ConnectorSelector.displayName = "ConnectorSelector";
 
-const SearchModeSelector = React.memo(
-	({
-		searchMode,
-		onSearchModeChange,
-	}: {
-		searchMode?: "DOCUMENTS" | "CHUNKS";
-		onSearchModeChange?: (mode: "DOCUMENTS" | "CHUNKS") => void;
-	}) => {
-		const handleDocumentsClick = React.useCallback(() => {
-			onSearchModeChange?.("DOCUMENTS");
-		}, [onSearchModeChange]);
-
-		const handleChunksClick = React.useCallback(() => {
-			onSearchModeChange?.("CHUNKS");
-		}, [onSearchModeChange]);
-
-		return (
-			<div className="flex items-center gap-2">
-				<div className="inline-flex h-9 items-center justify-center rounded-lg bg-muted p-1 text-muted-foreground">
-					<button
-						type="button"
-						onClick={handleDocumentsClick}
-						className={`inline-flex items-center justify-center whitespace-nowrap rounded-md px-3 py-1.5 text-xs font-medium transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 ${
-							searchMode === "DOCUMENTS"
-								? "bg-background text-foreground shadow-sm"
-								: "hover:bg-background/50 hover:text-foreground"
-						}`}
-					>
-						<FolderOpen className="h-3.5 w-3.5 mr-1.5" />
-						<span className="hidden sm:inline">Documents</span>
-						<span className="sm:hidden">Docs</span>
-					</button>
-					<button
-						type="button"
-						onClick={handleChunksClick}
-						className={`inline-flex items-center justify-center whitespace-nowrap rounded-md px-3 py-1.5 text-xs font-medium transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 ${
-							searchMode === "CHUNKS"
-								? "bg-background text-foreground shadow-sm"
-								: "hover:bg-background/50 hover:text-foreground"
-						}`}
-					>
-						<Zap className="h-3.5 w-3.5 mr-1.5" />
-						Chunks
-					</button>
-				</div>
-			</div>
-		);
-	}
-);
-
-SearchModeSelector.displayName = "SearchModeSelector";
-
 const TopKSelector = React.memo(
 	({ topK = 10, onTopKChange }: { topK?: number; onTopKChange?: (topK: number) => void }) => {
 		const MIN_VALUE = 1;
@@ -566,17 +544,21 @@ const LLMSelector = React.memo(() => {
 	const { search_space_id } = useParams();
 	const searchSpaceId = Number(search_space_id);
 
-	const { llmConfigs, loading: llmLoading, error } = useLLMConfigs(searchSpaceId);
 	const {
-		globalConfigs,
-		loading: globalConfigsLoading,
-		error: globalConfigsError,
-	} = useGlobalLLMConfigs();
+		data: llmConfigs = [],
+		isFetching: llmLoading,
+		isError: error,
+	} = useAtomValue(llmConfigsAtom);
 	const {
-		preferences,
-		updatePreferences,
-		loading: preferencesLoading,
-	} = useLLMPreferences(searchSpaceId);
+		data: globalConfigs = [],
+		isFetching: globalConfigsLoading,
+		isError: globalConfigsError,
+	} = useAtomValue(globalLLMConfigsAtom);
+
+	// Replace useLLMPreferences with jotai atoms
+	const { data: preferences = {}, isFetching: preferencesLoading } =
+		useAtomValue(llmPreferencesAtom);
+	const { mutateAsync: updatePreferences } = useAtomValue(updateLLMPreferencesMutationAtom);
 
 	const isLoading = llmLoading || preferencesLoading || globalConfigsLoading;
 
@@ -601,7 +583,9 @@ const LLMSelector = React.memo(() => {
 				<span className="hidden sm:inline text-muted-foreground text-xs truncate max-w-[60px]">
 					{selectedConfig.name}
 				</span>
-				{selectedConfig.is_global && <span className="text-xs">🌐</span>}
+				{"is_global" in selectedConfig && selectedConfig.is_global && (
+					<span className="text-xs">🌐</span>
+				)}
 			</div>
 		);
 	}, [selectedConfig]);
@@ -609,9 +593,12 @@ const LLMSelector = React.memo(() => {
 	const handleValueChange = React.useCallback(
 		(value: string) => {
 			const llmId = value ? parseInt(value, 10) : undefined;
-			updatePreferences({ fast_llm_id: llmId });
+			updatePreferences({
+				search_space_id: searchSpaceId,
+				data: { fast_llm_id: llmId },
+			});
 		},
-		[updatePreferences]
+		[updatePreferences, searchSpaceId]
 	);
 
 	// Loading skeleton
@@ -783,8 +770,6 @@ const CustomChatInputOptions = React.memo(
 		selectedDocuments,
 		onConnectorSelectionChange,
 		selectedConnectors,
-		searchMode,
-		onSearchModeChange,
 		topK,
 		onTopKChange,
 	}: {
@@ -792,8 +777,6 @@ const CustomChatInputOptions = React.memo(
 		selectedDocuments?: Document[];
 		onConnectorSelectionChange?: (connectorTypes: string[]) => void;
 		selectedConnectors?: string[];
-		searchMode?: "DOCUMENTS" | "CHUNKS";
-		onSearchModeChange?: (mode: "DOCUMENTS" | "CHUNKS") => void;
 		topK?: number;
 		onTopKChange?: (topK: number) => void;
 	}) => {
@@ -820,8 +803,6 @@ const CustomChatInputOptions = React.memo(
 					</Suspense>
 				</div>
 				<div className="h-4 w-px bg-border hidden sm:block" />
-				<SearchModeSelector searchMode={searchMode} onSearchModeChange={onSearchModeChange} />
-				<div className="h-4 w-px bg-border hidden sm:block" />
 				<TopKSelector topK={topK} onTopKChange={onTopKChange} />
 				<div className="h-4 w-px bg-border hidden sm:block" />
 				<LLMSelector />
@@ -838,8 +819,6 @@ export const ChatInputUI = React.memo(
 		selectedDocuments,
 		onConnectorSelectionChange,
 		selectedConnectors,
-		searchMode,
-		onSearchModeChange,
 		topK,
 		onTopKChange,
 	}: {
@@ -847,8 +826,6 @@ export const ChatInputUI = React.memo(
 		selectedDocuments?: Document[];
 		onConnectorSelectionChange?: (connectorTypes: string[]) => void;
 		selectedConnectors?: string[];
-		searchMode?: "DOCUMENTS" | "CHUNKS";
-		onSearchModeChange?: (mode: "DOCUMENTS" | "CHUNKS") => void;
 		topK?: number;
 		onTopKChange?: (topK: number) => void;
 	}) => {
@@ -863,8 +840,6 @@ export const ChatInputUI = React.memo(
 					selectedDocuments={selectedDocuments}
 					onConnectorSelectionChange={onConnectorSelectionChange}
 					selectedConnectors={selectedConnectors}
-					searchMode={searchMode}
-					onSearchModeChange={onSearchModeChange}
 					topK={topK}
 					onTopKChange={onTopKChange}
 				/>

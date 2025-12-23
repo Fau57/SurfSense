@@ -1,9 +1,10 @@
 "use client";
 
+import { useQuery } from "@tanstack/react-query";
 import { useAtomValue } from "jotai";
 import { usePathname } from "next/navigation";
 import { useTranslations } from "next-intl";
-import React, { useEffect } from "react";
+import React, { useEffect, useState } from "react";
 import { activeChatAtom } from "@/atoms/chats/chat-query.atoms";
 import {
 	Breadcrumb,
@@ -13,7 +14,9 @@ import {
 	BreadcrumbPage,
 	BreadcrumbSeparator,
 } from "@/components/ui/breadcrumb";
-import { useSearchSpace } from "@/hooks/use-search-space";
+import { searchSpacesApiService } from "@/lib/apis/search-spaces-api.service";
+import { authenticatedFetch, getBearerToken } from "@/lib/auth-utils";
+import { cacheKeys } from "@/lib/query-client/cache-keys";
 
 interface BreadcrumbItemInterface {
 	label: string;
@@ -28,11 +31,48 @@ export function DashboardBreadcrumb() {
 	const segments = pathname.split("/").filter(Boolean);
 	const searchSpaceId = segments[0] === "dashboard" && segments[1] ? segments[1] : null;
 
-	// Fetch search space details if we have an ID
-	const { searchSpace } = useSearchSpace({
-		searchSpaceId: searchSpaceId || "",
-		autoFetch: !!searchSpaceId,
+	const { data: searchSpace } = useQuery({
+		queryKey: cacheKeys.searchSpaces.detail(searchSpaceId || ""),
+		queryFn: () => searchSpacesApiService.getSearchSpace({ id: Number(searchSpaceId) }),
+		enabled: !!searchSpaceId,
 	});
+
+	// State to store document title for editor breadcrumb
+	const [documentTitle, setDocumentTitle] = useState<string | null>(null);
+
+	// Fetch document title when on editor page
+	useEffect(() => {
+		if (segments[2] === "editor" && segments[3] && searchSpaceId) {
+			const documentId = segments[3];
+
+			// Skip fetch for "new" notes
+			if (documentId === "new") {
+				setDocumentTitle(null);
+				return;
+			}
+
+			const token = getBearerToken();
+
+			if (token) {
+				authenticatedFetch(
+					`${process.env.NEXT_PUBLIC_FASTAPI_BACKEND_URL}/api/v1/search-spaces/${searchSpaceId}/documents/${documentId}/editor-content`,
+					{ method: "GET" }
+				)
+					.then((res) => res.json())
+					.then((data) => {
+						if (data.title) {
+							setDocumentTitle(data.title);
+						}
+					})
+					.catch(() => {
+						// If fetch fails, just use the document ID
+						setDocumentTitle(null);
+					});
+			}
+		} else {
+			setDocumentTitle(null);
+		}
+	}, [segments, searchSpaceId]);
 
 	// Parse the pathname to create breadcrumb items
 	const generateBreadcrumbs = (path: string): BreadcrumbItemInterface[] => {
@@ -66,6 +106,7 @@ export function DashboardBreadcrumb() {
 					logs: t("logs"),
 					chats: t("chats"),
 					settings: t("settings"),
+					editor: t("editor"),
 				};
 
 				sectionLabel = sectionLabels[section] || sectionLabel;
@@ -73,7 +114,28 @@ export function DashboardBreadcrumb() {
 				// Handle sub-sections
 				if (segments[3]) {
 					const subSection = segments[3];
-					let subSectionLabel = subSection.charAt(0).toUpperCase() + subSection.slice(1);
+
+					// Handle editor sub-sections (document ID)
+					if (section === "editor") {
+						// Handle special cases for editor
+						let documentLabel: string;
+						if (subSection === "new") {
+							documentLabel = "New Note";
+						} else {
+							documentLabel = documentTitle || subSection;
+						}
+
+						breadcrumbs.push({
+							label: t("documents"),
+							href: `/dashboard/${segments[1]}/documents`,
+						});
+						breadcrumbs.push({
+							label: sectionLabel,
+							href: `/dashboard/${segments[1]}/documents`,
+						});
+						breadcrumbs.push({ label: documentLabel });
+						return breadcrumbs;
+					}
 
 					// Handle sources sub-sections
 					if (section === "sources") {
@@ -81,7 +143,7 @@ export function DashboardBreadcrumb() {
 							add: "Add Sources",
 						};
 
-						const sourceLabel = sourceLabels[subSection] || subSectionLabel;
+						const sourceLabel = sourceLabels[subSection] || subSection;
 						breadcrumbs.push({
 							label: "Sources",
 							href: `/dashboard/${segments[1]}/sources`,
@@ -98,7 +160,7 @@ export function DashboardBreadcrumb() {
 							webpage: t("add_webpages"),
 						};
 
-						const documentLabel = documentLabels[subSection] || subSectionLabel;
+						const documentLabel = documentLabels[subSection] || subSection;
 						breadcrumbs.push({
 							label: t("documents"),
 							href: `/dashboard/${segments[1]}/documents`,
@@ -128,16 +190,17 @@ export function DashboardBreadcrumb() {
 								"github-connector": "GitHub",
 								"jira-connector": "Jira",
 								"confluence-connector": "Confluence",
+								"bookstack-connector": "BookStack",
 								"discord-connector": "Discord",
 								"linear-connector": "Linear",
 								"clickup-connector": "ClickUp",
 								"slack-connector": "Slack",
 								"notion-connector": "Notion",
 								"tavily-api": "Tavily API",
-								"serper-api": "Serper API",
 								"linkup-api": "LinkUp API",
 								"luma-connector": "Luma",
 								"elasticsearch-connector": "Elasticsearch",
+								"webcrawler-connector": "Web Pages",
 							};
 
 							const connectorLabel = connectorLabels[connectorType] || connectorType;
@@ -158,7 +221,7 @@ export function DashboardBreadcrumb() {
 							manage: t("manage_connectors"),
 						};
 
-						const connectorLabel = connectorLabels[subSection] || subSectionLabel;
+						const connectorLabel = connectorLabels[subSection] || subSection;
 						breadcrumbs.push({
 							label: t("connectors"),
 							href: `/dashboard/${segments[1]}/connectors`,
@@ -168,6 +231,7 @@ export function DashboardBreadcrumb() {
 					}
 
 					// Handle other sub-sections
+					let subSectionLabel = subSection.charAt(0).toUpperCase() + subSection.slice(1);
 					const subSectionLabels: Record<string, string> = {
 						upload: t("upload_documents"),
 						youtube: t("add_youtube"),

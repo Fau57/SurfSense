@@ -14,7 +14,7 @@ export const chatSummary = z.object({
 });
 
 export const chatDetails = chatSummary.extend({
-	initial_connectors: z.array(z.string()),
+	initial_connectors: z.array(z.string()).nullable().optional(),
 	messages: z.array(z.any()),
 });
 
@@ -26,6 +26,13 @@ export const getChatsRequest = z.object({
 			search_space_id: z.number().or(z.string()).optional(),
 		})
 		.nullish(),
+});
+
+export const searchChatsRequest = z.object({
+	queryParams: paginationQueryParams.extend({
+		title: z.string(),
+		search_space_id: z.number().or(z.string()).optional(),
+	}),
 });
 
 export const deleteChatResponse = z.object({
@@ -49,6 +56,7 @@ export type ChatSummary = z.infer<typeof chatSummary>;
 export type ChatDetails = z.infer<typeof chatDetails> & { messages: Message[] };
 export type GetChatDetailsRequest = z.infer<typeof getChatDetailsRequest>;
 export type GetChatsRequest = z.infer<typeof getChatsRequest>;
+export type SearchChatsRequest = z.infer<typeof searchChatsRequest>;
 export type DeleteChatResponse = z.infer<typeof deleteChatResponse>;
 export type DeleteChatRequest = z.infer<typeof deleteChatRequest>;
 export type CreateChatRequest = z.infer<typeof createChatRequest>;

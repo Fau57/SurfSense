@@ -1,5 +1,6 @@
 "use client";
 
+import { useAtomValue } from "jotai";
 import {
 	AlertCircle,
 	Bot,
@@ -15,6 +16,12 @@ import {
 import { motion } from "motion/react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
+import { updateLLMPreferencesMutationAtom } from "@/atoms/llm-config/llm-config-mutation.atoms";
+import {
+	globalLLMConfigsAtom,
+	llmConfigsAtom,
+	llmPreferencesAtom,
+} from "@/atoms/llm-config/llm-config-query.atoms";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -27,7 +34,6 @@ import {
 	SelectTrigger,
 	SelectValue,
 } from "@/components/ui/select";
-import { useGlobalLLMConfigs, useLLMConfigs, useLLMPreferences } from "@/hooks/use-llm-configs";
 
 const ROLE_DESCRIPTIONS = {
 	long_context: {
@@ -62,24 +68,25 @@ interface LLMRoleManagerProps {
 
 export function LLMRoleManager({ searchSpaceId }: LLMRoleManagerProps) {
 	const {
-		llmConfigs,
-		loading: configsLoading,
+		data: llmConfigs = [],
+		isFetching: configsLoading,
 		error: configsError,
-		refreshConfigs,
-	} = useLLMConfigs(searchSpaceId);
+		refetch: refreshConfigs,
+	} = useAtomValue(llmConfigsAtom);
 	const {
-		globalConfigs,
-		loading: globalConfigsLoading,
+		data: globalConfigs = [],
+		isFetching: globalConfigsLoading,
 		error: globalConfigsError,
-		refreshGlobalConfigs,
-	} = useGlobalLLMConfigs();
+		refetch: refreshGlobalConfigs,
+	} = useAtomValue(globalLLMConfigsAtom);
 	const {
-		preferences,
-		loading: preferencesLoading,
+		data: preferences = {},
+		isFetching: preferencesLoading,
 		error: preferencesError,
-		updatePreferences,
-		refreshPreferences,
-	} = useLLMPreferences(searchSpaceId);
+		refetch: refreshPreferences,
+	} = useAtomValue(llmPreferencesAtom);
+
+	const { mutateAsync: updatePreferences } = useAtomValue(updateLLMPreferencesMutationAtom);
 
 	const [assignments, setAssignments] = useState({
 		long_context_llm_id: preferences.long_context_llm_id || "",
@@ -148,12 +155,13 @@ export function LLMRoleManager({ searchSpaceId }: LLMRoleManagerProps) {
 					: assignments.strategic_llm_id,
 		};
 
-		const success = await updatePreferences(numericAssignments);
+		await updatePreferences({
+			search_space_id: searchSpaceId,
+			data: numericAssignments,
+		});
 
-		if (success) {
-			setHasChanges(false);
-			toast.success("LLM role assignments saved successfully!");
-		}
+		setHasChanges(false);
+		toast.success("LLM role assignments saved successfully!");
 
 		setIsSaving(false);
 	};
@@ -203,7 +211,7 @@ export function LLMRoleManager({ searchSpaceId }: LLMRoleManagerProps) {
 					<Button
 						variant="outline"
 						size="sm"
-						onClick={refreshConfigs}
+						onClick={() => refreshConfigs()}
 						disabled={isLoading}
 						className="flex items-center gap-2"
 					>
@@ -214,7 +222,7 @@ export function LLMRoleManager({ searchSpaceId }: LLMRoleManagerProps) {
 					<Button
 						variant="outline"
 						size="sm"
-						onClick={refreshPreferences}
+						onClick={() => refreshPreferences()}
 						disabled={isLoading}
 						className="flex items-center gap-2"
 					>
@@ -230,7 +238,9 @@ export function LLMRoleManager({ searchSpaceId }: LLMRoleManagerProps) {
 				<Alert variant="destructive">
 					<AlertCircle className="h-4 w-4" />
 					<AlertDescription>
-						{configsError || preferencesError || globalConfigsError}
+						{(configsError?.message ?? "Failed to load LLM configurations") ||
+							(preferencesError?.message ?? "Failed to load preferences") ||
+							(globalConfigsError?.message ?? "Failed to load global configurations")}
 					</AlertDescription>
 				</Alert>
 			)}
@@ -255,93 +265,89 @@ export function LLMRoleManager({ searchSpaceId }: LLMRoleManagerProps) {
 
 			{/* Stats Overview */}
 			{!isLoading && !hasError && (
-				<div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-					<Card className="border-l-4 border-l-blue-500">
-						<CardContent className="p-6">
-							<div className="flex items-center justify-between space-x-4">
-								<div className="space-y-1">
-									<p className="text-3xl font-bold tracking-tight">{availableConfigs.length}</p>
-									<p className="text-sm font-medium text-muted-foreground">Available Models</p>
-									<div className="flex gap-2 text-xs text-muted-foreground">
-										<span>🌐 {globalConfigs.length} Global</span>
-										<span>• {llmConfigs.length} Custom</span>
+				<div className="grid gap-3 grid-cols-2 lg:grid-cols-4">
+					<Card className="overflow-hidden">
+						<div className="h-1 bg-blue-500" />
+						<CardContent className="p-4">
+							<div className="flex items-start justify-between gap-2">
+								<div className="space-y-1 min-w-0">
+									<p className="text-2xl font-bold tracking-tight">{availableConfigs.length}</p>
+									<p className="text-xs font-medium text-muted-foreground">Available Models</p>
+									<div className="flex flex-wrap gap-x-2 gap-y-0.5 text-[10px] text-muted-foreground">
+										<span>{globalConfigs.length} Global</span>
+										<span>{llmConfigs.length} Custom</span>
 									</div>
 								</div>
-								<div className="flex h-12 w-12 items-center justify-center rounded-lg bg-blue-500/10">
-									<Bot className="h-6 w-6 text-blue-600" />
+								<div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-blue-500/10">
+									<Bot className="h-4 w-4 text-blue-600" />
 								</div>
 							</div>
 						</CardContent>
 					</Card>
 
-					<Card className="border-l-4 border-l-purple-500">
-						<CardContent className="p-6">
-							<div className="flex items-center justify-between space-x-4">
-								<div className="space-y-1">
-									<p className="text-3xl font-bold tracking-tight">{assignedConfigIds.length}</p>
-									<p className="text-sm font-medium text-muted-foreground">Assigned Roles</p>
+					<Card className="overflow-hidden">
+						<div className="h-1 bg-purple-500" />
+						<CardContent className="p-4">
+							<div className="flex items-start justify-between gap-2">
+								<div className="space-y-1 min-w-0">
+									<p className="text-2xl font-bold tracking-tight">{assignedConfigIds.length}</p>
+									<p className="text-xs font-medium text-muted-foreground">Assigned Roles</p>
 								</div>
-								<div className="flex h-12 w-12 items-center justify-center rounded-lg bg-purple-500/10">
-									<CheckCircle className="h-6 w-6 text-purple-600" />
+								<div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-purple-500/10">
+									<CheckCircle className="h-4 w-4 text-purple-600" />
 								</div>
 							</div>
 						</CardContent>
 					</Card>
 
-					<Card
-						className={`border-l-4 ${
-							isAssignmentComplete ? "border-l-green-500" : "border-l-yellow-500"
-						}`}
-					>
-						<CardContent className="p-6">
-							<div className="flex items-center justify-between space-x-4">
-								<div className="space-y-1">
-									<p className="text-3xl font-bold tracking-tight">
+					<Card className="overflow-hidden">
+						<div className={`h-1 ${isAssignmentComplete ? "bg-green-500" : "bg-yellow-500"}`} />
+						<CardContent className="p-4">
+							<div className="flex items-start justify-between gap-2">
+								<div className="space-y-1 min-w-0">
+									<p className="text-2xl font-bold tracking-tight">
 										{Math.round((assignedConfigIds.length / 3) * 100)}%
 									</p>
-									<p className="text-sm font-medium text-muted-foreground">Completion</p>
+									<p className="text-xs font-medium text-muted-foreground">Completion</p>
 								</div>
 								<div
-									className={`flex h-12 w-12 items-center justify-center rounded-lg ${
+									className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ${
 										isAssignmentComplete ? "bg-green-500/10" : "bg-yellow-500/10"
 									}`}
 								>
 									{isAssignmentComplete ? (
-										<CheckCircle className="h-6 w-6 text-green-600" />
+										<CheckCircle className="h-4 w-4 text-green-600" />
 									) : (
-										<AlertCircle className="h-6 w-6 text-yellow-600" />
+										<AlertCircle className="h-4 w-4 text-yellow-600" />
 									)}
 								</div>
 							</div>
 						</CardContent>
 					</Card>
 
-					<Card
-						className={`border-l-4 ${
-							isAssignmentComplete ? "border-l-emerald-500" : "border-l-orange-500"
-						}`}
-					>
-						<CardContent className="p-6">
-							<div className="flex items-center justify-between space-x-4">
-								<div className="space-y-1">
+					<Card className="overflow-hidden">
+						<div className={`h-1 ${isAssignmentComplete ? "bg-emerald-500" : "bg-orange-500"}`} />
+						<CardContent className="p-4">
+							<div className="flex items-start justify-between gap-2">
+								<div className="space-y-1 min-w-0">
 									<p
-										className={`text-3xl font-bold tracking-tight ${
+										className={`text-2xl font-bold tracking-tight ${
 											isAssignmentComplete ? "text-emerald-600" : "text-orange-600"
 										}`}
 									>
 										{isAssignmentComplete ? "Ready" : "Setup"}
 									</p>
-									<p className="text-sm font-medium text-muted-foreground">Status</p>
+									<p className="text-xs font-medium text-muted-foreground">Status</p>
 								</div>
 								<div
-									className={`flex h-12 w-12 items-center justify-center rounded-lg ${
+									className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ${
 										isAssignmentComplete ? "bg-emerald-500/10" : "bg-orange-500/10"
 									}`}
 								>
 									{isAssignmentComplete ? (
-										<CheckCircle className="h-6 w-6 text-emerald-600" />
+										<CheckCircle className="h-4 w-4 text-emerald-600" />
 									) : (
-										<RefreshCw className="h-6 w-6 text-orange-600" />
+										<RefreshCw className="h-4 w-4 text-orange-600" />
 									)}
 								</div>
 							</div>
@@ -413,19 +419,6 @@ export function LLMRoleManager({ searchSpaceId }: LLMRoleManagerProps) {
 												</div>
 											</CardHeader>
 											<CardContent className="space-y-4">
-												<div className="space-y-2">
-													<div className="text-sm text-muted-foreground">
-														<strong>Use cases:</strong> {role.examples}
-													</div>
-													<div className="flex flex-wrap gap-1">
-														{role.characteristics.map((char, idx) => (
-															<Badge key={idx} variant="outline" className="text-xs">
-																{char}
-															</Badge>
-														))}
-													</div>
-												</div>
-
 												<div className="space-y-2">
 													<Label className="text-sm font-medium">Assign LLM Configuration:</Label>
 													<Select
@@ -501,7 +494,7 @@ export function LLMRoleManager({ searchSpaceId }: LLMRoleManagerProps) {
 															<span className="font-medium">Assigned:</span>
 															<Badge variant="secondary">{assignedConfig.provider}</Badge>
 															<span>{assignedConfig.name}</span>
-															{assignedConfig.is_global && (
+															{"is_global" in assignedConfig && assignedConfig.is_global && (
 																<Badge variant="outline" className="text-xs">
 																	🌐 Global
 																</Badge>

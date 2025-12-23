@@ -1,37 +1,36 @@
 "use client";
 
 import { type CreateMessage, type Message, useChat } from "@ai-sdk/react";
-import { useAtomValue } from "jotai";
+import { useAtom, useAtomValue } from "jotai";
 import { useParams, useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef } from "react";
 import { createChatMutationAtom, updateChatMutationAtom } from "@/atoms/chats/chat-mutation.atoms";
 import { activeChatAtom } from "@/atoms/chats/chat-query.atoms";
 import { activeChatIdAtom } from "@/atoms/chats/ui.atoms";
+import { documentTypeCountsAtom } from "@/atoms/documents/document-query.atoms";
 import ChatInterface from "@/components/chat/ChatInterface";
+import type { Document } from "@/contracts/types/document.types";
 import { useChatState } from "@/hooks/use-chat";
-import { useDocumentTypes } from "@/hooks/use-document-types";
-import type { Document } from "@/hooks/use-documents";
 import { useSearchSourceConnectors } from "@/hooks/use-search-source-connectors";
 
 export default function ResearcherPage() {
 	const { search_space_id } = useParams();
 	const router = useRouter();
 	const hasSetInitialConnectors = useRef(false);
+	const hasInitiatedResponse = useRef<string | null>(null);
 	const activeChatId = useAtomValue(activeChatIdAtom);
 	const { data: activeChatState, isFetching: isChatLoading } = useAtomValue(activeChatAtom);
 	const { mutateAsync: createChat } = useAtomValue(createChatMutationAtom);
 	const { mutateAsync: updateChat } = useAtomValue(updateChatMutationAtom);
 	const isNewChat = !activeChatId;
 
-	// Reset the flag when chat ID changes
+	// Reset the flag when chat ID changes (but not hasInitiatedResponse - we need to remember if we already initiated)
 	useEffect(() => {
 		hasSetInitialConnectors.current = false;
 	}, [activeChatId]);
 
 	const {
 		token,
-		searchMode,
-		setSearchMode,
 		researchMode,
 		selectedConnectors,
 		setSelectedConnectors,
@@ -45,7 +44,19 @@ export default function ResearcherPage() {
 	});
 
 	// Fetch all available sources (document types + live search connectors)
-	const { documentTypes } = useDocumentTypes(Number(search_space_id));
+	// Use the documentTypeCountsAtom for fetching document types
+	const [documentTypeCountsQuery] = useAtom(documentTypeCountsAtom);
+	const { data: documentTypeCountsData } = documentTypeCountsQuery;
+
+	// Transform the response into the expected format
+	const documentTypes = useMemo(() => {
+		if (!documentTypeCountsData) return [];
+		return Object.entries(documentTypeCountsData).map(([type, count]) => ({
+			type,
+			count,
+		}));
+	}, [documentTypeCountsData]);
+
 	const { connectors: searchConnectors } = useSearchSourceConnectors(
 		false,
 		Number(search_space_id)
@@ -71,7 +82,6 @@ export default function ResearcherPage() {
 	interface ChatState {
 		selectedDocuments: Document[];
 		selectedConnectors: string[];
-		searchMode: "DOCUMENTS" | "CHUNKS";
 		researchMode: "QNA"; // Always QNA mode
 		topK: number;
 	}
@@ -111,7 +121,6 @@ export default function ResearcherPage() {
 				search_space_id: search_space_id,
 				selected_connectors: connectorTypes,
 				research_mode: researchMode,
-				search_mode: searchMode,
 				document_ids_to_add_in_context: documentIds,
 				top_k: topK,
 			},
@@ -125,9 +134,13 @@ export default function ResearcherPage() {
 		message: Message | CreateMessage,
 		chatRequestOptions?: { data?: any }
 	) => {
+		// Use the first message content as the chat title (truncated to 100 chars)
+		const messageContent = typeof message.content === "string" ? message.content : "";
+		const chatTitle = messageContent.slice(0, 100) || "Untitled Chat";
+
 		const newChat = await createChat({
 			type: researchMode,
-			title: "Untitled Chat",
+			title: chatTitle,
 			initial_connectors: selectedConnectors,
 			messages: [
 				{
@@ -142,7 +155,6 @@ export default function ResearcherPage() {
 			storeChatState(search_space_id as string, String(newChat.id), {
 				selectedDocuments,
 				selectedConnectors,
-				searchMode,
 				researchMode,
 				topK,
 			});
@@ -167,10 +179,14 @@ export default function ResearcherPage() {
 			if (chatData.messages && Array.isArray(chatData.messages)) {
 				if (chatData.messages.length === 1 && chatData.messages[0].role === "user") {
 					// Single user message - append to trigger LLM response
-					handler.append({
-						role: "user",
-						content: chatData.messages[0].content,
-					});
+					// Only if we haven't already initiated for this chat and handler doesn't have messages yet
+					if (hasInitiatedResponse.current !== activeChatId && handler.messages.length === 0) {
+						hasInitiatedResponse.current = activeChatId;
+						handler.append({
+							role: "user",
+							content: chatData.messages[0].content,
+						});
+					}
 				} else if (chatData.messages.length > 1) {
 					// Multiple messages - set them all
 					handler.setMessages(chatData.messages);
@@ -186,7 +202,6 @@ export default function ResearcherPage() {
 			if (restoredState) {
 				setSelectedDocuments(restoredState.selectedDocuments);
 				setSelectedConnectors(restoredState.selectedConnectors);
-				setSearchMode(restoredState.searchMode);
 				setTopK(restoredState.topK);
 				// researchMode is always "QNA", no need to restore
 			}
@@ -197,7 +212,6 @@ export default function ResearcherPage() {
 		search_space_id,
 		setSelectedDocuments,
 		setSelectedConnectors,
-		setSearchMode,
 		setTopK,
 	]);
 
@@ -270,8 +284,6 @@ export default function ResearcherPage() {
 			selectedDocuments={selectedDocuments}
 			onConnectorSelectionChange={setSelectedConnectors}
 			selectedConnectors={selectedConnectors}
-			searchMode={searchMode}
-			onSearchModeChange={setSearchMode}
 			topK={topK}
 			onTopKChange={setTopK}
 		/>

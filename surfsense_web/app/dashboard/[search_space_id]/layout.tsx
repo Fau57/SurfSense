@@ -53,12 +53,6 @@ export default function DashboardLayout({
 			],
 		},
 		{
-			title: "Settings",
-			url: `/dashboard/${search_space_id}/settings`,
-			icon: "Settings2",
-			items: [],
-		},
-		{
 			title: "Logs",
 			url: `/dashboard/${search_space_id}/logs`,
 			icon: "FileText",

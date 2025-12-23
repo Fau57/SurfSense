@@ -69,6 +69,7 @@ Edit the `.env` file and set the following variables:
 | DATABASE_URL               | PostgreSQL connection string (e.g., `postgresql+asyncpg://postgres:postgres@localhost:5432/surfsense`)                                                                                    |
 | SECRET_KEY                 | JWT Secret key for authentication (should be a secure random string)                                                                                                                      |
 | NEXT_FRONTEND_URL          | URL where your frontend application is hosted (e.g., `http://localhost:3000`)                                                                                                             |
+| BACKEND_URL                | (Optional) Public URL of the backend for OAuth callbacks (e.g., `https://api.yourdomain.com`). Required when running behind a reverse proxy with HTTPS. Used to set correct OAuth redirect URLs and secure cookies. |
 | AUTH_TYPE                  | Authentication method: `GOOGLE` for OAuth with Google, `LOCAL` for email/password authentication                                                                                          |
 | GOOGLE_OAUTH_CLIENT_ID     | (Optional) Client ID from Google Cloud Console (required if AUTH_TYPE=GOOGLE)                                                                                                                        |
 | GOOGLE_OAUTH_CLIENT_SECRET | (Optional) Client secret from Google Cloud Console (required if AUTH_TYPE=GOOGLE)                                                                                                                    |
@@ -89,6 +90,7 @@ Edit the `.env` file and set the following variables:
 | CELERY_RESULT_BACKEND      | Redis connection URL for Celery result backend (e.g., `redis://localhost:6379/0`)                                                                                                        |
 | SCHEDULE_CHECKER_INTERVAL  | (Optional) How often to check for scheduled connector tasks. Format: `<number><unit>` where unit is `m` (minutes) or `h` (hours). Examples: `1m`, `5m`, `1h`, `2h` (default: `1m`)                  |
 | REGISTRATION_ENABLED       | (Optional) Enable or disable new user registration (e.g., `TRUE` or `FALSE`, default: `TRUE`)                                                                                                       |
+| PAGES_LIMIT                | (Optional) Maximum pages limit per user for ETL services (default: `999999999` for unlimited in OSS version)                                                                                        |
 
 
 **(Optional) Backend LangSmith Observability:**

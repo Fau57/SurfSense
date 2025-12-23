@@ -1,5 +1,7 @@
 "use client";
 
+import { useQuery } from "@tanstack/react-query";
+import { useAtomValue } from "jotai";
 import {
 	ChevronDown,
 	ChevronUp,
@@ -12,6 +14,7 @@ import {
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
+import { communityPromptsAtom } from "@/atoms/search-spaces/search-space-query.atoms";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -23,19 +26,25 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
-import { type CommunityPrompt, useCommunityPrompts } from "@/hooks/use-community-prompts";
-import { useSearchSpace } from "@/hooks/use-search-space";
+import { searchSpacesApiService } from "@/lib/apis/search-spaces-api.service";
+import { authenticatedFetch } from "@/lib/auth-utils";
+import { cacheKeys } from "@/lib/query-client/cache-keys";
 
 interface PromptConfigManagerProps {
 	searchSpaceId: number;
 }
 
 export function PromptConfigManager({ searchSpaceId }: PromptConfigManagerProps) {
-	const { searchSpace, loading, fetchSearchSpace } = useSearchSpace({
-		searchSpaceId,
-		autoFetch: true,
+	const {
+		data: searchSpace,
+		isLoading: loading,
+		refetch: fetchSearchSpace,
+	} = useQuery({
+		queryKey: cacheKeys.searchSpaces.detail(searchSpaceId.toString()),
+		queryFn: () => searchSpacesApiService.getSearchSpace({ id: searchSpaceId }),
+		enabled: !!searchSpaceId,
 	});
-	const { prompts, loading: loadingPrompts } = useCommunityPrompts();
+	const { data: prompts = [], isPending: loadingPrompts } = useAtomValue(communityPromptsAtom);
 
 	const [enableCitations, setEnableCitations] = useState(true);
 	const [customInstructions, setCustomInstructions] = useState("");
@@ -78,14 +87,11 @@ export function PromptConfigManager({ searchSpaceId }: PromptConfigManagerProps)
 
 			// Only send request if we have something to update
 			if (Object.keys(payload).length > 0) {
-				const response = await fetch(
+				const response = await authenticatedFetch(
 					`${process.env.NEXT_PUBLIC_FASTAPI_BACKEND_URL}/api/v1/searchspaces/${searchSpaceId}`,
 					{
 						method: "PUT",
-						headers: {
-							"Content-Type": "application/json",
-							Authorization: `Bearer ${localStorage.getItem("surfsense_bearer_token")}`,
-						},
+						headers: { "Content-Type": "application/json" },
 						body: JSON.stringify(payload),
 					}
 				);

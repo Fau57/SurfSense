@@ -6,18 +6,18 @@ import { AnimatePresence, motion } from "motion/react";
 import { useParams, usePathname, useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 import type React from "react";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { activeChathatUIAtom, activeChatIdAtom } from "@/atoms/chats/ui.atoms";
-import { activeSearchSpaceIdAtom } from "@/atoms/seach-spaces/seach-space-queries.atom";
+import { llmPreferencesAtom } from "@/atoms/llm-config/llm-config-query.atoms";
+import { myAccessAtom } from "@/atoms/members/members-query.atoms";
+import { activeSearchSpaceIdAtom } from "@/atoms/search-spaces/search-space-query.atoms";
 import { ChatPanelContainer } from "@/components/chat/ChatPanel/ChatPanelContainer";
 import { DashboardBreadcrumb } from "@/components/dashboard-breadcrumb";
 import { LanguageSwitcher } from "@/components/LanguageSwitcher";
 import { AppSidebarProvider } from "@/components/sidebar/AppSidebarProvider";
-import { ThemeTogglerComponent } from "@/components/theme/theme-toggle";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
 import { SidebarInset, SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar";
-import { useLLMPreferences } from "@/hooks/use-llm-configs";
 import { cn } from "@/lib/utils";
 
 export function DashboardClientLayout({
@@ -59,11 +59,24 @@ export function DashboardClientLayout({
 		}
 	}, [activeChatId, isChatPannelOpen]);
 
-	const { loading, error, isOnboardingComplete } = useLLMPreferences(searchSpaceIdNum);
+	const { data: preferences = {}, isFetching: loading, error } = useAtomValue(llmPreferencesAtom);
+
+	const isOnboardingComplete = useCallback(() => {
+		return !!(
+			preferences.long_context_llm_id &&
+			preferences.fast_llm_id &&
+			preferences.strategic_llm_id
+		);
+	}, [preferences]);
+
+	const { data: access = null, isLoading: accessLoading } = useAtomValue(myAccessAtom);
 	const [hasCheckedOnboarding, setHasCheckedOnboarding] = useState(false);
 
 	// Skip onboarding check if we're already on the onboarding page
 	const isOnboardingPage = pathname?.includes("/onboard");
+
+	// Only owners should see onboarding - invited members use existing config
+	const isOwner = access?.is_owner ?? false;
 
 	// Translate navigation items
 	const tNavMenu = useTranslations("nav_menu");
@@ -102,11 +115,13 @@ export function DashboardClientLayout({
 			return;
 		}
 
-		// Only check once after preferences have loaded
-		if (!loading && !hasCheckedOnboarding) {
+		// Wait for both preferences and access data to load
+		if (!loading && !accessLoading && !hasCheckedOnboarding) {
 			const onboardingComplete = isOnboardingComplete();
 
-			if (!onboardingComplete) {
+			// Only redirect to onboarding if user is the owner and onboarding is not complete
+			// Invited members (non-owners) should skip onboarding and use existing config
+			if (!onboardingComplete && isOwner) {
 				router.push(`/dashboard/${searchSpaceId}/onboard`);
 			}
 
@@ -114,8 +129,10 @@ export function DashboardClientLayout({
 		}
 	}, [
 		loading,
+		accessLoading,
 		isOnboardingComplete,
 		isOnboardingPage,
+		isOwner,
 		router,
 		searchSpaceId,
 		hasCheckedOnboarding,
@@ -145,7 +162,7 @@ export function DashboardClientLayout({
 	}, [chat_id, search_space_id]);
 
 	// Show loading screen while checking onboarding status (only on first load)
-	if (!hasCheckedOnboarding && loading && !isOnboardingPage) {
+	if (!hasCheckedOnboarding && (loading || accessLoading) && !isOnboardingPage) {
 		return (
 			<div className="flex flex-col items-center justify-center min-h-screen space-y-4">
 				<Card className="w-[350px] bg-background/60 backdrop-blur-sm">
@@ -173,7 +190,9 @@ export function DashboardClientLayout({
 						<CardDescription>{t("failed_load_llm_config")}</CardDescription>
 					</CardHeader>
 					<CardContent>
-						<p className="text-sm text-muted-foreground">{error}</p>
+						<p className="text-sm text-muted-foreground">
+							{error instanceof Error ? error.message : String(error)}
+						</p>
 					</CardContent>
 				</Card>
 			</div>
@@ -204,7 +223,6 @@ export function DashboardClientLayout({
 								</div>
 								<div className="flex items-center gap-2">
 									<LanguageSwitcher />
-									<ThemeTogglerComponent />
 									{/* Only show artifacts toggle on researcher page */}
 									{isResearcherPage && (
 										<motion.div

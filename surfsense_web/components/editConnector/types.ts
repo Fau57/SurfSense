@@ -28,7 +28,6 @@ export const editConnectorSchema = z.object({
 	name: z.string().min(3, { message: "Connector name must be at least 3 characters." }),
 	SLACK_BOT_TOKEN: z.string().optional(),
 	NOTION_INTEGRATION_TOKEN: z.string().optional(),
-	SERPER_API_KEY: z.string().optional(),
 	TAVILY_API_KEY: z.string().optional(),
 	SEARXNG_HOST: z.string().optional(),
 	SEARXNG_API_KEY: z.string().optional(),
@@ -43,6 +42,9 @@ export const editConnectorSchema = z.object({
 	CONFLUENCE_BASE_URL: z.string().optional(),
 	CONFLUENCE_EMAIL: z.string().optional(),
 	CONFLUENCE_API_TOKEN: z.string().optional(),
+	BOOKSTACK_BASE_URL: z.string().optional(),
+	BOOKSTACK_TOKEN_ID: z.string().optional(),
+	BOOKSTACK_TOKEN_SECRET: z.string().optional(),
 	JIRA_BASE_URL: z.string().optional(),
 	JIRA_EMAIL: z.string().optional(),
 	JIRA_API_TOKEN: z.string().optional(),
@@ -52,5 +54,7 @@ export const editConnectorSchema = z.object({
 	GOOGLE_CALENDAR_CALENDAR_IDS: z.string().optional(),
 	LUMA_API_KEY: z.string().optional(),
 	ELASTICSEARCH_API_KEY: z.string().optional(),
+	FIRECRAWL_API_KEY: z.string().optional(),
+	INITIAL_URLS: z.string().optional(),
 });
 export type EditConnectorFormValues = z.infer<typeof editConnectorSchema>;

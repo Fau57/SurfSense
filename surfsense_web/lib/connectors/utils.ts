@@ -1,7 +1,6 @@
 // Helper function to get connector type display name
 export const getConnectorTypeDisplay = (type: string): string => {
 	const typeMap: Record<string, string> = {
-		SERPER_API: "Serper API",
 		TAVILY_API: "Tavily API",
 		SEARXNG_API: "SearxNG",
 		SLACK_CONNECTOR: "Slack",
@@ -18,6 +17,7 @@ export const getConnectorTypeDisplay = (type: string): string => {
 		AIRTABLE_CONNECTOR: "Airtable",
 		LUMA_CONNECTOR: "Luma",
 		ELASTICSEARCH_CONNECTOR: "Elasticsearch",
+		WEBCRAWLER_CONNECTOR: "Web Pages",
 	};
 	return typeMap[type] || type;
 };

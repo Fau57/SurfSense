@@ -15,6 +15,7 @@ import {
 	type SearchSourceConnector,
 	useSearchSourceConnectors,
 } from "@/hooks/use-search-source-connectors";
+import { authenticatedFetch } from "@/lib/auth-utils";
 
 const normalizeListInput = (value: unknown): string[] => {
 	if (Array.isArray(value)) {
@@ -78,7 +79,6 @@ export function useConnectorEditPage(connectorId: number, searchSpaceId: string)
 			name: "",
 			SLACK_BOT_TOKEN: "",
 			NOTION_INTEGRATION_TOKEN: "",
-			SERPER_API_KEY: "",
 			TAVILY_API_KEY: "",
 			SEARXNG_HOST: "",
 			SEARXNG_API_KEY: "",
@@ -92,11 +92,16 @@ export function useConnectorEditPage(connectorId: number, searchSpaceId: string)
 			CONFLUENCE_BASE_URL: "",
 			CONFLUENCE_EMAIL: "",
 			CONFLUENCE_API_TOKEN: "",
+			BOOKSTACK_BASE_URL: "",
+			BOOKSTACK_TOKEN_ID: "",
+			BOOKSTACK_TOKEN_SECRET: "",
 			JIRA_BASE_URL: "",
 			JIRA_EMAIL: "",
 			JIRA_API_TOKEN: "",
 			LUMA_API_KEY: "",
 			ELASTICSEARCH_API_KEY: "",
+			FIRECRAWL_API_KEY: "",
+			INITIAL_URLS: "",
 		},
 	});
 
@@ -112,7 +117,6 @@ export function useConnectorEditPage(connectorId: number, searchSpaceId: string)
 					name: currentConnector.name,
 					SLACK_BOT_TOKEN: config.SLACK_BOT_TOKEN || "",
 					NOTION_INTEGRATION_TOKEN: config.NOTION_INTEGRATION_TOKEN || "",
-					SERPER_API_KEY: config.SERPER_API_KEY || "",
 					TAVILY_API_KEY: config.TAVILY_API_KEY || "",
 					SEARXNG_HOST: config.SEARXNG_HOST || "",
 					SEARXNG_API_KEY: config.SEARXNG_API_KEY || "",
@@ -137,11 +141,16 @@ export function useConnectorEditPage(connectorId: number, searchSpaceId: string)
 					CONFLUENCE_BASE_URL: config.CONFLUENCE_BASE_URL || "",
 					CONFLUENCE_EMAIL: config.CONFLUENCE_EMAIL || "",
 					CONFLUENCE_API_TOKEN: config.CONFLUENCE_API_TOKEN || "",
+					BOOKSTACK_BASE_URL: config.BOOKSTACK_BASE_URL || "",
+					BOOKSTACK_TOKEN_ID: config.BOOKSTACK_TOKEN_ID || "",
+					BOOKSTACK_TOKEN_SECRET: config.BOOKSTACK_TOKEN_SECRET || "",
 					JIRA_BASE_URL: config.JIRA_BASE_URL || "",
 					JIRA_EMAIL: config.JIRA_EMAIL || "",
 					JIRA_API_TOKEN: config.JIRA_API_TOKEN || "",
 					LUMA_API_KEY: config.LUMA_API_KEY || "",
 					ELASTICSEARCH_API_KEY: config.ELASTICSEARCH_API_KEY || "",
+					FIRECRAWL_API_KEY: config.FIRECRAWL_API_KEY || "",
+					INITIAL_URLS: config.INITIAL_URLS || "",
 				});
 				if (currentConnector.connector_type === "GITHUB_CONNECTOR") {
 					const savedRepos = config.repo_full_names || [];
@@ -174,16 +183,11 @@ export function useConnectorEditPage(connectorId: number, searchSpaceId: string)
 			setIsFetchingRepos(true);
 			setFetchedRepos(null);
 			try {
-				const token = localStorage.getItem("surfsense_bearer_token");
-				if (!token) throw new Error("No auth token");
-				const response = await fetch(
+				const response = await authenticatedFetch(
 					`${process.env.NEXT_PUBLIC_FASTAPI_BACKEND_URL}/api/v1/github/repositories`,
 					{
 						method: "POST",
-						headers: {
-							"Content-Type": "application/json",
-							Authorization: `Bearer ${token}`,
-						},
+						headers: { "Content-Type": "application/json" },
 						body: JSON.stringify({ github_pat: values.github_pat }),
 					}
 				);
@@ -274,16 +278,6 @@ export function useConnectorEditPage(connectorId: number, searchSpaceId: string)
 						newConfig = {
 							NOTION_INTEGRATION_TOKEN: formData.NOTION_INTEGRATION_TOKEN,
 						};
-					}
-					break;
-				case "SERPER_API":
-					if (formData.SERPER_API_KEY !== originalConfig.SERPER_API_KEY) {
-						if (!formData.SERPER_API_KEY) {
-							toast.error("Serper Key empty.");
-							setIsSaving(false);
-							return;
-						}
-						newConfig = { SERPER_API_KEY: formData.SERPER_API_KEY };
 					}
 					break;
 				case "TAVILY_API":
@@ -431,6 +425,28 @@ export function useConnectorEditPage(connectorId: number, searchSpaceId: string)
 						};
 					}
 					break;
+				case "BOOKSTACK_CONNECTOR":
+					if (
+						formData.BOOKSTACK_BASE_URL !== originalConfig.BOOKSTACK_BASE_URL ||
+						formData.BOOKSTACK_TOKEN_ID !== originalConfig.BOOKSTACK_TOKEN_ID ||
+						formData.BOOKSTACK_TOKEN_SECRET !== originalConfig.BOOKSTACK_TOKEN_SECRET
+					) {
+						if (
+							!formData.BOOKSTACK_BASE_URL ||
+							!formData.BOOKSTACK_TOKEN_ID ||
+							!formData.BOOKSTACK_TOKEN_SECRET
+						) {
+							toast.error("All BookStack fields are required.");
+							setIsSaving(false);
+							return;
+						}
+						newConfig = {
+							BOOKSTACK_BASE_URL: formData.BOOKSTACK_BASE_URL,
+							BOOKSTACK_TOKEN_ID: formData.BOOKSTACK_TOKEN_ID,
+							BOOKSTACK_TOKEN_SECRET: formData.BOOKSTACK_TOKEN_SECRET,
+						};
+					}
+					break;
 				case "JIRA_CONNECTOR":
 					if (
 						formData.JIRA_BASE_URL !== originalConfig.JIRA_BASE_URL ||
@@ -467,6 +483,35 @@ export function useConnectorEditPage(connectorId: number, searchSpaceId: string)
 							return;
 						}
 						newConfig = { ELASTICSEARCH_API_KEY: formData.ELASTICSEARCH_API_KEY };
+					}
+					break;
+				case "WEBCRAWLER_CONNECTOR":
+					if (
+						formData.FIRECRAWL_API_KEY !== originalConfig.FIRECRAWL_API_KEY ||
+						formData.INITIAL_URLS !== originalConfig.INITIAL_URLS
+					) {
+						newConfig = {};
+
+						if (formData.FIRECRAWL_API_KEY && formData.FIRECRAWL_API_KEY.trim()) {
+							if (!formData.FIRECRAWL_API_KEY.startsWith("fc-")) {
+								toast.warning(
+									"Firecrawl API keys typically start with 'fc-'. Please verify your key."
+								);
+							}
+							newConfig.FIRECRAWL_API_KEY = formData.FIRECRAWL_API_KEY.trim();
+						} else if (originalConfig.FIRECRAWL_API_KEY) {
+							toast.info(
+								"Firecrawl API key removed. Web crawler will use AsyncChromiumLoader as fallback."
+							);
+						}
+
+						if (formData.INITIAL_URLS !== undefined) {
+							if (formData.INITIAL_URLS && formData.INITIAL_URLS.trim()) {
+								newConfig.INITIAL_URLS = formData.INITIAL_URLS.trim();
+							} else if (originalConfig.INITIAL_URLS) {
+								toast.info("URLs removed from crawler configuration.");
+							}
+						}
 					}
 					break;
 			}
@@ -513,8 +558,6 @@ export function useConnectorEditPage(connectorId: number, searchSpaceId: string)
 							"NOTION_INTEGRATION_TOKEN",
 							newlySavedConfig.NOTION_INTEGRATION_TOKEN || ""
 						);
-					} else if (connector.connector_type === "SERPER_API") {
-						editForm.setValue("SERPER_API_KEY", newlySavedConfig.SERPER_API_KEY || "");
 					} else if (connector.connector_type === "TAVILY_API") {
 						editForm.setValue("TAVILY_API_KEY", newlySavedConfig.TAVILY_API_KEY || "");
 					} else if (connector.connector_type === "SEARXNG_API") {
@@ -551,6 +594,13 @@ export function useConnectorEditPage(connectorId: number, searchSpaceId: string)
 						editForm.setValue("CONFLUENCE_BASE_URL", newlySavedConfig.CONFLUENCE_BASE_URL || "");
 						editForm.setValue("CONFLUENCE_EMAIL", newlySavedConfig.CONFLUENCE_EMAIL || "");
 						editForm.setValue("CONFLUENCE_API_TOKEN", newlySavedConfig.CONFLUENCE_API_TOKEN || "");
+					} else if (connector.connector_type === "BOOKSTACK_CONNECTOR") {
+						editForm.setValue("BOOKSTACK_BASE_URL", newlySavedConfig.BOOKSTACK_BASE_URL || "");
+						editForm.setValue("BOOKSTACK_TOKEN_ID", newlySavedConfig.BOOKSTACK_TOKEN_ID || "");
+						editForm.setValue(
+							"BOOKSTACK_TOKEN_SECRET",
+							newlySavedConfig.BOOKSTACK_TOKEN_SECRET || ""
+						);
 					} else if (connector.connector_type === "JIRA_CONNECTOR") {
 						editForm.setValue("JIRA_BASE_URL", newlySavedConfig.JIRA_BASE_URL || "");
 						editForm.setValue("JIRA_EMAIL", newlySavedConfig.JIRA_EMAIL || "");
@@ -562,6 +612,9 @@ export function useConnectorEditPage(connectorId: number, searchSpaceId: string)
 							"ELASTICSEARCH_API_KEY",
 							newlySavedConfig.ELASTICSEARCH_API_KEY || ""
 						);
+					} else if (connector.connector_type === "WEBCRAWLER_CONNECTOR") {
+						editForm.setValue("FIRECRAWL_API_KEY", newlySavedConfig.FIRECRAWL_API_KEY || "");
+						editForm.setValue("INITIAL_URLS", newlySavedConfig.INITIAL_URLS || "");
 					}
 				}
 				if (connector.connector_type === "GITHUB_CONNECTOR") {

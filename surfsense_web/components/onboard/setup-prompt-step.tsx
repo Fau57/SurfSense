@@ -1,8 +1,10 @@
 "use client";
 
+import { useAtomValue } from "jotai";
 import { ChevronDown, ChevronUp, ExternalLink, Info, Sparkles, User } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
+import { communityPromptsAtom } from "@/atoms/search-spaces/search-space-query.atoms";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -12,7 +14,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
-import { type CommunityPrompt, useCommunityPrompts } from "@/hooks/use-community-prompts";
+import { authenticatedFetch } from "@/lib/auth-utils";
 
 interface SetupPromptStepProps {
 	searchSpaceId: number;
@@ -20,7 +22,7 @@ interface SetupPromptStepProps {
 }
 
 export function SetupPromptStep({ searchSpaceId, onComplete }: SetupPromptStepProps) {
-	const { prompts, loading: loadingPrompts } = useCommunityPrompts();
+	const { data: prompts = [], isPending: loadingPrompts } = useAtomValue(communityPromptsAtom);
 	const [enableCitations, setEnableCitations] = useState(true);
 	const [customInstructions, setCustomInstructions] = useState("");
 	const [saving, setSaving] = useState(false);
@@ -74,14 +76,11 @@ export function SetupPromptStep({ searchSpaceId, onComplete }: SetupPromptStepPr
 
 			// Only send update if there's something to update
 			if (Object.keys(payload).length > 0) {
-				const response = await fetch(
+				const response = await authenticatedFetch(
 					`${process.env.NEXT_PUBLIC_FASTAPI_BACKEND_URL}/api/v1/searchspaces/${searchSpaceId}`,
 					{
 						method: "PUT",
-						headers: {
-							"Content-Type": "application/json",
-							Authorization: `Bearer ${localStorage.getItem("surfsense_bearer_token")}`,
-						},
+						headers: { "Content-Type": "application/json" },
 						body: JSON.stringify(payload),
 					}
 				);

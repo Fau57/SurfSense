@@ -1,5 +1,5 @@
-import { th } from "date-fns/locale";
 import type z from "zod";
+import { getBearerToken, handleUnauthorized } from "../auth-utils";
 import { AppError, AuthenticationError, AuthorizationError, NotFoundError } from "../error";
 
 enum ResponseType {
@@ -58,7 +58,6 @@ class BaseApiService {
 			 */
 			const defaultOptions: RequestOptions = {
 				headers: {
-					"Content-Type": "application/json",
 					Authorization: `Bearer ${this.bearerToken || ""}`,
 				},
 				method: "GET",
@@ -132,6 +131,8 @@ class BaseApiService {
 
 				switch (response.status) {
 					case 401:
+						// Use centralized auth handler for 401 responses
+						handleUnauthorized();
 						throw new AuthenticationError(
 							"You are not authenticated. Please login again.",
 							response.status,
@@ -209,8 +210,11 @@ class BaseApiService {
 		options?: Omit<RequestOptions, "method" | "responseType">
 	) {
 		return this.request(url, responseSchema, {
-			...options,
 			method: "GET",
+			headers: {
+				"Content-Type": "application/json",
+			},
+			...options,
 			responseType: ResponseType.JSON,
 		});
 	}
@@ -222,6 +226,9 @@ class BaseApiService {
 	) {
 		return this.request(url, responseSchema, {
 			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+			},
 			...options,
 			responseType: ResponseType.JSON,
 		});
@@ -234,6 +241,9 @@ class BaseApiService {
 	) {
 		return this.request(url, responseSchema, {
 			method: "PUT",
+			headers: {
+				"Content-Type": "application/json",
+			},
 			...options,
 			responseType: ResponseType.JSON,
 		});
@@ -246,6 +256,9 @@ class BaseApiService {
 	) {
 		return this.request(url, responseSchema, {
 			method: "DELETE",
+			headers: {
+				"Content-Type": "application/json",
+			},
 			...options,
 			responseType: ResponseType.JSON,
 		});
@@ -258,9 +271,29 @@ class BaseApiService {
 			responseType: ResponseType.BLOB,
 		});
 	}
+
+	async postFormData<T>(
+		url: string,
+		responseSchema?: z.ZodSchema<T>,
+		options?: Omit<RequestOptions, "method" | "responseType" | "body"> & { body: FormData }
+	) {
+		// Remove Content-Type from options headers if present
+		const { "Content-Type": _, ...headersWithoutContentType } = options?.headers ?? {};
+
+		return this.request(url, responseSchema, {
+			method: "POST",
+			...options,
+			headers: {
+				// Don't set Content-Type - let browser set it with multipart boundary
+				Authorization: `Bearer ${this.bearerToken}`,
+				...headersWithoutContentType,
+			},
+			responseType: ResponseType.JSON,
+		});
+	}
 }
 
 export const baseApiService = new BaseApiService(
-	typeof window !== "undefined" ? localStorage.getItem("surfsense_bearer_token") || "" : "",
+	typeof window !== "undefined" ? getBearerToken() || "" : "",
 	process.env.NEXT_PUBLIC_FASTAPI_BACKEND_URL || ""
 );

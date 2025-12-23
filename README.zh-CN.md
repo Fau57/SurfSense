@@ -39,25 +39,31 @@ https://github.com/user-attachments/assets/a0a16566-6967-4374-ac51-9b3e07fbecd7
 ## 核心功能
 
 ### 💡 **理念**: 
-拥有您自己的高度可定制的私有 NotebookLM 和 Perplexity，并与外部数据源集成。
+- 拥有您自己的高度可定制的私有 NotebookLM 和 Perplexity，并与外部数据源集成。
 
 ### 📁 **支持多种文件格式上传**
-将您个人文件中的内容（文档、图像、视频，支持 **50+ 种文件扩展名**）保存到您自己的个人知识库。
+- 将您个人文件中的内容（文档、图像、视频，支持 **50+ 种文件扩展名**）保存到您自己的个人知识库。
 
 ### 🔍 **强大的搜索功能**
-快速研究或查找已保存内容中的任何信息。
+- 快速研究或查找已保存内容中的任何信息。
 
 ### 💬 **与已保存内容对话**
-使用自然语言交互并获得引用答案。
+- 使用自然语言交互并获得引用答案。
 
 ### 📄 **引用答案**
-像 Perplexity 一样获得带引用的答案。
+- 像 Perplexity 一样获得带引用的答案。
 
 ### 🔔 **隐私保护与本地 LLM 支持**
-完美支持 Ollama 本地大语言模型。
+- 完美支持 Ollama 本地大语言模型。
 
 ### 🏠 **可自托管**
-开源且易于本地部署。
+- 开源且易于本地部署。
+
+### 👥 **团队协作与 RBAC**
+- 搜索空间的基于角色的访问控制
+- 使用可自定义的角色（所有者、管理员、编辑者、查看者）邀请团队成员
+- 对文档、聊天、连接器和设置的细粒度权限控制
+- 在组织内安全共享知识库
 
 ### 🎙️ **播客功能**
 - 超快速播客生成代理（在 20 秒内创建 3 分钟播客）
@@ -93,41 +99,13 @@ https://github.com/user-attachments/assets/a0a16566-6967-4374-ac51-9b3e07fbecd7
 
 ## 📄 **支持的文件扩展名**
 
-> **注意**：文件格式支持取决于您的 ETL 服务配置。LlamaCloud 支持 50+ 种格式，Unstructured 支持 34+ 种核心格式，Docling 支持核心格式（本地处理、注重隐私、无需 API 密钥）。
+| ETL 服务 | 格式 | 说明 |
+|----------|------|------|
+| **LlamaCloud** | 50+ 种格式 | 文档、演示文稿、电子表格、图像 |
+| **Unstructured** | 34+ 种格式 | 核心格式 + 电子邮件支持 |
+| **Docling** | 核心格式 | 本地处理，无需 API 密钥 |
 
-### 文档与文本
-**LlamaCloud**: `.pdf`, `.doc`, `.docx`, `.docm`, `.dot`, `.dotm`, `.rtf`, `.txt`, `.xml`, `.epub`, `.odt`, `.wpd`, `.pages`, `.key`, `.numbers`, `.602`, `.abw`, `.cgm`, `.cwk`, `.hwp`, `.lwp`, `.mw`, `.mcw`, `.pbd`, `.sda`, `.sdd`, `.sdp`, `.sdw`, `.sgl`, `.sti`, `.sxi`, `.sxw`, `.stw`, `.sxg`, `.uof`, `.uop`, `.uot`, `.vor`, `.wps`, `.zabw`
-
-**Unstructured**: `.doc`, `.docx`, `.odt`, `.rtf`, `.pdf`, `.xml`, `.txt`, `.md`, `.markdown`, `.rst`, `.html`, `.org`, `.epub`
-
-**Docling**: `.pdf`, `.docx`, `.html`, `.htm`, `.xhtml`, `.adoc`, `.asciidoc`
-
-### 演示文稿
-**LlamaCloud**: `.ppt`, `.pptx`, `.pptm`, `.pot`, `.potm`, `.potx`, `.odp`, `.key`
-
-**Unstructured**: `.ppt`, `.pptx`
-
-**Docling**: `.pptx`
-
-### 电子表格与数据
-**LlamaCloud**: `.xlsx`, `.xls`, `.xlsm`, `.xlsb`, `.xlw`, `.csv`, `.tsv`, `.ods`, `.fods`, `.numbers`, `.dbf`, `.123`, `.dif`, `.sylk`, `.slk`, `.prn`, `.et`, `.uos1`, `.uos2`, `.wk1`, `.wk2`, `.wk3`, `.wk4`, `.wks`, `.wq1`, `.wq2`, `.wb1`, `.wb2`, `.wb3`, `.qpw`, `.xlr`, `.eth`
-
-**Unstructured**: `.xls`, `.xlsx`, `.csv`, `.tsv`
-
-**Docling**: `.xlsx`, `.csv`
-
-### 图像
-**LlamaCloud**: `.jpg`, `.jpeg`, `.png`, `.gif`, `.bmp`, `.svg`, `.tiff`, `.webp`, `.html`, `.htm`, `.web`
-
-**Unstructured**: `.jpg`, `.jpeg`, `.png`, `.bmp`, `.tiff`, `.heic`
-
-**Docling**: `.jpg`, `.jpeg`, `.png`, `.bmp`, `.tiff`, `.tif`, `.webp`
-
-### 音频与视频 **（始终支持）**
-`.mp3`, `.mpga`, `.m4a`, `.wav`, `.mp4`, `.mpeg`, `.webm`
-
-### 电子邮件与通讯
-**Unstructured**: `.eml`, `.msg`, `.p7s`
+**音频/视频**（通过 STT 服务）：`.mp3`、`.wav`、`.mp4`、`.webm` 等
 
 ### 🔖 **跨浏览器扩展**
 - SurfSense 扩展可用于保存您喜欢的任何网页
@@ -146,37 +124,95 @@ https://github.com/user-attachments/assets/a0a16566-6967-4374-ac51-9b3e07fbecd7
 随时了解我们的开发进度和即将推出的功能！  
 查看我们的公开路线图并贡献您的想法或反馈：
 
-**查看路线图：** [SurfSense 路线图 (GitHub Projects)](https://github.com/users/MODSetter/projects/2)
+**📋 路线图讨论：** [SurfSense 2025-2026 路线图：深度代理、实时协作与 MCP 服务器](https://github.com/MODSetter/SurfSense/discussions/565)
+
+**📊 看板：** [SurfSense 项目看板](https://github.com/users/MODSetter/projects/3)
 
 
 ## 如何开始？
 
+### 使用 Docker 快速开始 🐳
+
+> [!TIP]
+> 对于生产部署，请使用完整的 [Docker Compose 设置](https://www.surfsense.com/docs/docker-installation)，它提供更多控制和可扩展性。
+
+**Linux/macOS:**
+
+```bash
+docker run -d -p 3000:3000 -p 8000:8000 \
+  -v surfsense-data:/data \
+  --name surfsense \
+  --restart unless-stopped \
+  ghcr.io/modsetter/surfsense:latest
+```
+
+**Windows (PowerShell):**
+
+```powershell
+docker run -d -p 3000:3000 -p 8000:8000 `
+  -v surfsense-data:/data `
+  --name surfsense `
+  --restart unless-stopped `
+  ghcr.io/modsetter/surfsense:latest
+```
+
+**使用自定义配置（例如 OpenAI 嵌入）：**
+
+```bash
+docker run -d -p 3000:3000 -p 8000:8000 \
+  -v surfsense-data:/data \
+  -e EMBEDDING_MODEL=openai://text-embedding-ada-002 \
+  -e OPENAI_API_KEY=your_openai_api_key \
+  --name surfsense \
+  --restart unless-stopped \
+  ghcr.io/modsetter/surfsense:latest
+```
+
+启动后，访问 SurfSense：
+- **前端**: [http://localhost:3000](http://localhost:3000)
+- **后端 API**: [http://localhost:8000](http://localhost:8000)
+- **API 文档**: [http://localhost:8000/docs](http://localhost:8000/docs)
+
+**常用命令：**
+
+```bash
+docker logs -f surfsense      # 查看日志
+docker stop surfsense         # 停止
+docker start surfsense        # 启动
+docker rm surfsense           # 删除（数据保留在卷中）
+```
+
 ### 安装选项
 
-SurfSense 提供三种入门方式：
+SurfSense 提供多种入门方式：
 
 1. **[SurfSense Cloud](https://www.surfsense.com/login)** - 无需任何设置即可试用 SurfSense 的最简单方法。
    - 无需安装
    - 即时访问所有功能
    - 非常适合快速上手
 
-2. **[Docker 安装（推荐用于自托管）](https://www.surfsense.net/docs/docker-installation)** - 通过容器化所有依赖项，轻松启动和运行 SurfSense。
+2. **快速启动 Docker（上述方法）** - 一条命令即可在本地运行 SurfSense。
+   - 一体化镜像，捆绑 PostgreSQL、Redis 和所有服务
+   - 非常适合评估、开发和小型部署
+   - 数据通过 Docker 卷持久化
+
+3. **[Docker Compose（生产环境）](https://www.surfsense.com/docs/docker-installation)** - 使用独立服务进行完整堆栈部署。
    - 包含 pgAdmin，通过 Web UI 进行数据库管理
    - 支持通过 `.env` 文件自定义环境变量
    - 灵活的部署选项（完整堆栈或仅核心服务）
-   - 无需在环境之间手动编辑配置文件
+   - 更适合生产环境，支持独立扩展服务
 
-3. **[手动安装](https://www.surfsense.net/docs/manual-installation)** - 适合希望对设置有更多控制或需要自定义部署的用户。
+4. **[手动安装](https://www.surfsense.com/docs/manual-installation)** - 适合希望对设置有更多控制或需要自定义部署的用户。
 
 Docker 和手动安装指南都包含适用于 Windows、macOS 和 Linux 的详细操作系统特定说明。
 
-在自托管安装之前，请确保完成[先决条件设置步骤](https://www.surfsense.net/docs/)，包括：
-- 身份验证设置
-- **文件处理 ETL 服务**（选择其一）：
+在自托管安装之前，请确保完成[先决条件设置步骤](https://www.surfsense.com/docs/)，包括：
+- 身份验证设置（可选 - 默认为 LOCAL 身份验证）
+- **文件处理 ETL 服务**（可选 - 默认为 Docling）：
+  - Docling（默认，本地处理，无需 API 密钥，支持 PDF、Office 文档、图像、HTML、CSV）
   - Unstructured.io API 密钥（支持 34+ 种格式）
   - LlamaIndex API 密钥（增强解析，支持 50+ 种格式）
-  - Docling（本地处理，无需 API 密钥，支持 PDF、Office 文档、图像、HTML、CSV）
-- 其他所需的 API 密钥
+- 其他根据用例需要的 API 密钥
 
 ## 截图
 

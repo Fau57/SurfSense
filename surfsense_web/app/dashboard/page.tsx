@@ -1,12 +1,16 @@
 "use client";
 
-import { AlertCircle, Loader2, Plus, Search, Trash2 } from "lucide-react";
+import { useAtomValue } from "jotai";
+import { AlertCircle, Loader2, Plus, Search, Trash2, UserCheck, Users } from "lucide-react";
 import { motion, type Variants } from "motion/react";
 import Image from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { toast } from "sonner";
+import { deleteSearchSpaceMutationAtom } from "@/atoms/search-spaces/search-space-mutation.atoms";
+import { searchSpacesAtom } from "@/atoms/search-spaces/search-space-query.atoms";
+import { currentUserAtom } from "@/atoms/user/user-query.atoms";
 import { Logo } from "@/components/Logo";
 import { ThemeTogglerComponent } from "@/components/theme/theme-toggle";
 import { UserDropdown } from "@/components/UserDropdown";
@@ -22,6 +26,7 @@ import {
 	AlertDialogTitle,
 	AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
 	Card,
@@ -33,8 +38,7 @@ import {
 } from "@/components/ui/card";
 import { Spotlight } from "@/components/ui/spotlight";
 import { Tilt } from "@/components/ui/tilt";
-import { useUser } from "@/hooks";
-import { useSearchSpaces } from "@/hooks/use-search-spaces";
+import { authenticatedFetch } from "@/lib/auth-utils";
 
 /**
  * Formats a date string into a readable format
@@ -152,10 +156,15 @@ const DashboardPage = () => {
 		},
 	};
 
-	const { searchSpaces, loading, error, refreshSearchSpaces } = useSearchSpaces();
+	const {
+		data: searchSpaces = [],
+		isLoading: loading,
+		error,
+		refetch: refreshSearchSpaces,
+	} = useAtomValue(searchSpacesAtom);
+	const { mutateAsync: deleteSearchSpace } = useAtomValue(deleteSearchSpaceMutationAtom);
 
-	// Fetch user details
-	const { user, loading: isLoadingUser, error: userError } = useUser();
+	const { data: user, isPending: isLoadingUser, error: userError } = useAtomValue(currentUserAtom);
 
 	// Create user object for UserDropdown
 	const customUser = {
@@ -167,34 +176,11 @@ const DashboardPage = () => {
 	};
 
 	if (loading) return <LoadingScreen />;
-	if (error) return <ErrorScreen message={error} />;
+	if (error) return <ErrorScreen message={error?.message || "Failed to load search spaces"} />;
 
 	const handleDeleteSearchSpace = async (id: number) => {
-		// Send DELETE request to the API
-		try {
-			const response = await fetch(
-				`${process.env.NEXT_PUBLIC_FASTAPI_BACKEND_URL}/api/v1/searchspaces/${id}`,
-				{
-					method: "DELETE",
-					headers: {
-						Authorization: `Bearer ${localStorage.getItem("surfsense_bearer_token")}`,
-					},
-				}
-			);
-
-			if (!response.ok) {
-				toast.error("Failed to delete search space");
-				throw new Error("Failed to delete search space");
-			}
-
-			// Refresh the search spaces list after successful deletion
-			refreshSearchSpaces();
-		} catch (error) {
-			console.error("Error deleting search space:", error);
-			toast.error("An error occurred while deleting the search space");
-			return;
-		}
-		toast.success("Search space deleted successfully");
+		await deleteSearchSpace({ id });
+		refreshSearchSpaces();
 	};
 
 	return (
@@ -258,7 +244,7 @@ const DashboardPage = () => {
 										/>
 										<div className="flex flex-col h-full justify-between overflow-hidden rounded-xl border bg-muted/30 backdrop-blur-sm transition-all hover:border-primary/50">
 											<div className="relative h-32 w-full overflow-hidden">
-												<Link href={`/dashboard/${space.id}/documents`} key={space.id}>
+												<Link href={`/dashboard/${space.id}/researcher`} key={space.id}>
 													<Image
 														src="https://images.unsplash.com/photo-1519389950473-47ba0277781c?ixlib=rb-4.0.3&ixid=MnwxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8&auto=format&fit=crop&w=1740&q=80"
 														alt={space.name}
@@ -303,21 +289,35 @@ const DashboardPage = () => {
 											</div>
 											<Link
 												className="flex flex-1 flex-col p-4 cursor-pointer"
-												href={`/dashboard/${space.id}/documents`}
+												href={`/dashboard/${space.id}/researcher`}
 												key={space.id}
 											>
 												<div className="flex flex-1 flex-col justify-between p-1">
 													<div>
-														<h3 className="font-medium text-lg">{space.name}</h3>
+														<div className="flex items-center gap-2">
+															<h3 className="font-medium text-lg">{space.name}</h3>
+															{!space.is_owner && (
+																<Badge variant="secondary" className="text-xs font-normal">
+																	{t("shared")}
+																</Badge>
+															)}
+														</div>
 														<p className="mt-1 text-sm text-muted-foreground">
 															{space.description}
 														</p>
 													</div>
-													<div className="mt-4  text-xs text-muted-foreground">
-														{/* <span>{space.title}</span> */}
+													<div className="mt-4 flex items-center justify-between text-xs text-muted-foreground">
 														<span>
 															{t("created")} {formatDate(space.created_at)}
 														</span>
+														<div className="flex items-center gap-1">
+															{space.is_owner ? (
+																<UserCheck className="h-3.5 w-3.5" />
+															) : (
+																<Users className="h-3.5 w-3.5" />
+															)}
+															<span>{space.member_count}</span>
+														</div>
 													</div>
 												</div>
 											</Link>

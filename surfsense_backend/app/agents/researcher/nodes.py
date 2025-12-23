@@ -1,6 +1,7 @@
 import json
 import logging
 import traceback
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -11,66 +12,77 @@ from sqlalchemy.ext.asyncio import AsyncSession
 # Additional imports for document fetching
 from sqlalchemy.future import select
 
-from app.db import Document, SearchSpace
+from app.db import Document
 from app.services.connector_service import ConnectorService
 from app.services.query_service import QueryService
 
-from .configuration import Configuration, SearchMode
+from .configuration import Configuration
 from .prompts import get_further_questions_system_prompt
 from .qna_agent.graph import graph as qna_agent_graph
 from .state import State
 from .utils import get_connector_emoji, get_connector_friendly_name
+
+# Time filter constants - hardcoded 2 year time range for now
+DEFAULT_TIME_FILTER_YEARS = 2
 
 
 def extract_sources_from_documents(
     all_documents: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """
-    Extract sources from all_documents and group them by document type.
+    Extract sources from **document-grouped** results and group them by document type.
 
     Args:
-        all_documents: List of document chunks from user-selected documents and connector-fetched documents
+        all_documents: List of document-grouped results from user-selected documents and connector-fetched documents
 
     Returns:
         List of source objects grouped by type for streaming
     """
-    # Group documents by their source type
+    # Group sources by their source type
     documents_by_type = {}
 
     for doc in all_documents:
-        # Get source type from the document
+        document_info = doc.get("document", {}) or {}
         source_type = doc.get("source", "UNKNOWN")
-        document_info = doc.get("document", {})
-        document_type = document_info.get("document_type", source_type)
-
-        # Use document_type if available, otherwise use source
+        document_type = document_info.get("document_type", source_type) or source_type
         group_type = document_type if document_type != "UNKNOWN" else source_type
-
         if group_type not in documents_by_type:
             documents_by_type[group_type] = []
         documents_by_type[group_type].append(doc)
 
     # Create source objects for each document type
     source_objects = []
-    source_id_counter = 1
-
     for doc_type, docs in documents_by_type.items():
         sources_list = []
 
         for doc in docs:
             document_info = doc.get("document", {})
             metadata = document_info.get("metadata", {})
+            url = (
+                metadata.get("url")
+                or metadata.get("source")
+                or metadata.get("page_url")
+                or metadata.get("VisitedWebPageURL")
+                or ""
+            )
 
-            # Create source entry based on document structure
-            source = {
-                "id": doc.get("chunk_id", source_id_counter),
-                "title": document_info.get("title", "Untitled Document"),
-                "description": doc.get("content", "").strip(),
-                "url": metadata.get("url", metadata.get("page_url", "")),
-            }
-
-            source_id_counter += 1
-            sources_list.append(source)
+            # Each chunk becomes a source entry so citations like [citation:<chunk_id>] resolve in UI.
+            for chunk in doc.get("chunks", []) or []:
+                chunk_id = chunk.get("chunk_id")
+                chunk_content = (chunk.get("content") or "").strip()
+                description = (
+                    chunk_content
+                    if len(chunk_content) <= 240
+                    else chunk_content[:240] + "..."
+                )
+                sources_list.append(
+                    {
+                        "id": chunk_id,
+                        "title": document_info.get("title", "Untitled Document"),
+                        "description": description,
+                        "url": url,
+                    }
+                )
 
         # Create group object
         group_name = (
@@ -92,19 +104,18 @@ def extract_sources_from_documents(
 
 
 async def fetch_documents_by_ids(
-    document_ids: list[int], user_id: str, db_session: AsyncSession
+    document_ids: list[int], search_space_id: int, db_session: AsyncSession
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """
-    Fetch documents by their IDs with ownership check using DOCUMENTS mode approach.
+    Fetch documents by their IDs within a search space.
 
-    This function ensures that only documents belonging to the user are fetched,
-    providing security by checking ownership through SearchSpace association.
-    Similar to SearchMode.DOCUMENTS, it fetches full documents and concatenates their chunks.
+    This function ensures that only documents belonging to the search space are fetched.
+    It fetches full documents and returns their chunks individually.
     Also creates source objects for UI display, grouped by document type.
 
     Args:
         document_ids: List of document IDs to fetch
-        user_id: The user ID to check ownership
+        search_space_id: The search space ID to filter by
         db_session: The database session
 
     Returns:
@@ -114,59 +125,50 @@ async def fetch_documents_by_ids(
         return [], []
 
     try:
-        # Query documents with ownership check
+        # Query documents filtered by search space
         result = await db_session.execute(
-            select(Document)
-            .join(SearchSpace)
-            .filter(Document.id.in_(document_ids), SearchSpace.user_id == user_id)
+            select(Document).filter(
+                Document.id.in_(document_ids),
+                Document.search_space_id == search_space_id,
+            )
         )
         documents = result.scalars().all()
 
         # Group documents by type for source object creation
-        documents_by_type = {}
-        formatted_documents = []
+        documents_by_type: dict[str, list[Document]] = {}
+        formatted_documents: list[dict[str, Any]] = []
+
+        from app.db import Chunk
 
         for doc in documents:
-            # Fetch associated chunks for this document (similar to DocumentHybridSearchRetriever)
-            from app.db import Chunk
-
+            # Fetch associated chunks for this document
             chunks_query = (
                 select(Chunk).where(Chunk.document_id == doc.id).order_by(Chunk.id)
             )
             chunks_result = await db_session.execute(chunks_query)
             chunks = chunks_result.scalars().all()
 
-            # Return individual chunks instead of concatenated content
-            if chunks:
-                for chunk in chunks:
-                    # Format each chunk to match connector service return format
-                    formatted_chunk = {
-                        "chunk_id": chunk.id,
-                        "content": chunk.content,  # Use individual chunk content
-                        "score": 0.5,  # High score since user explicitly selected these
-                        "document": {
-                            "id": chunk.id,
-                            "title": doc.title,
-                            "document_type": (
-                                doc.document_type.value
-                                if doc.document_type
-                                else "UNKNOWN"
-                            ),
-                            "metadata": doc.document_metadata or {},
-                        },
-                        "source": doc.document_type.value
-                        if doc.document_type
-                        else "UNKNOWN",
-                    }
-                    formatted_documents.append(formatted_chunk)
+            doc_type = doc.document_type.value if doc.document_type else "UNKNOWN"
+            documents_by_type.setdefault(doc_type, []).append(doc)
 
-                    # Group by document type for source objects
-                    doc_type = (
-                        doc.document_type.value if doc.document_type else "UNKNOWN"
-                    )
-                    if doc_type not in documents_by_type:
-                        documents_by_type[doc_type] = []
-                    documents_by_type[doc_type].append(doc)
+            doc_group = {
+                "document_id": doc.id,
+                "content": "\n\n".join(c.content for c in chunks)
+                if chunks
+                else (doc.content or ""),
+                "score": 0.5,  # High score since user explicitly selected these
+                "chunks": [{"chunk_id": c.id, "content": c.content} for c in chunks]
+                if chunks
+                else [],
+                "document": {
+                    "id": doc.id,
+                    "title": doc.title,
+                    "document_type": doc_type,
+                    "metadata": doc.document_metadata or {},
+                },
+                "source": doc_type,
+            }
+            formatted_documents.append(doc_group)
 
         # Create source objects for each document type (similar to ConnectorService)
         source_objects = []
@@ -490,6 +492,7 @@ async def fetch_documents_by_ids(
                 "CLICKUP_CONNECTOR": "ClickUp (Selected)",
                 "AIRTABLE_CONNECTOR": "Airtable (Selected)",
                 "LUMA_CONNECTOR": "Luma Events (Selected)",
+                "NOTE": "Notes (Selected)",
             }
 
             source_object = {
@@ -515,7 +518,6 @@ async def fetch_documents_by_ids(
 
 async def fetch_relevant_documents(
     research_questions: list[str],
-    user_id: str,
     search_space_id: int,
     db_session: AsyncSession,
     connectors_to_search: list[str],
@@ -523,8 +525,9 @@ async def fetch_relevant_documents(
     state: State = None,
     top_k: int = 10,
     connector_service: ConnectorService = None,
-    search_mode: SearchMode = SearchMode.CHUNKS,
     user_selected_sources: list[dict[str, Any]] | None = None,
+    start_date: datetime | None = None,
+    end_date: datetime | None = None,
 ) -> list[dict[str, Any]]:
     """
     Fetch relevant documents for research questions using the provided connectors.
@@ -534,9 +537,10 @@ async def fetch_relevant_documents(
     displaying connector names (like "Web Search" instead of "TAVILY_API") and adding
     relevant emojis to indicate the type of source being searched.
 
+    Uses combined chunk-level and document-level hybrid search with RRF fusion.
+
     Args:
         research_questions: List of research questions to find documents for
-        user_id: The user ID
         search_space_id: The search space ID
         db_session: The database session
         connectors_to_search: List of connectors to search
@@ -544,6 +548,9 @@ async def fetch_relevant_documents(
         state: The current state containing the streaming service
         top_k: Number of top results to retrieve per connector per question
         connector_service: An initialized connector service to use for searching
+        user_selected_sources: Optional list of user-selected source objects
+        start_date: Optional start date for filtering documents by updated_at
+        end_date: Optional end date for filtering documents by updated_at
 
     Returns:
         List of relevant documents
@@ -619,10 +626,10 @@ async def fetch_relevant_documents(
                         youtube_chunks,
                     ) = await connector_service.search_youtube(
                         user_query=reformulated_query,
-                        user_id=user_id,
                         search_space_id=search_space_id,
                         top_k=top_k,
-                        search_mode=search_mode,
+                        start_date=start_date,
+                        end_date=end_date,
                     )
 
                     # Add to sources and raw documents
@@ -646,10 +653,10 @@ async def fetch_relevant_documents(
                         extension_chunks,
                     ) = await connector_service.search_extension(
                         user_query=reformulated_query,
-                        user_id=user_id,
                         search_space_id=search_space_id,
                         top_k=top_k,
-                        search_mode=search_mode,
+                        start_date=start_date,
+                        end_date=end_date,
                     )
 
                     # Add to sources and raw documents
@@ -673,10 +680,10 @@ async def fetch_relevant_documents(
                         crawled_urls_chunks,
                     ) = await connector_service.search_crawled_urls(
                         user_query=reformulated_query,
-                        user_id=user_id,
                         search_space_id=search_space_id,
                         top_k=top_k,
-                        search_mode=search_mode,
+                        start_date=start_date,
+                        end_date=end_date,
                     )
 
                     # Add to sources and raw documents
@@ -689,7 +696,7 @@ async def fetch_relevant_documents(
                         writer(
                             {
                                 "yield_value": streaming_service.format_terminal_info_delta(
-                                    f"🌐 Found {len(crawled_urls_chunks)} Web Pages chunks related to your query"
+                                    f"🌐 Found {len(crawled_urls_chunks)} Web Page chunks related to your query"
                                 )
                             }
                         )
@@ -697,10 +704,10 @@ async def fetch_relevant_documents(
                 elif connector == "FILE":
                     source_object, files_chunks = await connector_service.search_files(
                         user_query=reformulated_query,
-                        user_id=user_id,
                         search_space_id=search_space_id,
                         top_k=top_k,
-                        search_mode=search_mode,
+                        start_date=start_date,
+                        end_date=end_date,
                     )
 
                     # Add to sources and raw documents
@@ -721,10 +728,10 @@ async def fetch_relevant_documents(
                 elif connector == "SLACK_CONNECTOR":
                     source_object, slack_chunks = await connector_service.search_slack(
                         user_query=reformulated_query,
-                        user_id=user_id,
                         search_space_id=search_space_id,
                         top_k=top_k,
-                        search_mode=search_mode,
+                        start_date=start_date,
+                        end_date=end_date,
                     )
 
                     # Add to sources and raw documents
@@ -748,10 +755,10 @@ async def fetch_relevant_documents(
                         notion_chunks,
                     ) = await connector_service.search_notion(
                         user_query=reformulated_query,
-                        user_id=user_id,
                         search_space_id=search_space_id,
                         top_k=top_k,
-                        search_mode=search_mode,
+                        start_date=start_date,
+                        end_date=end_date,
                     )
 
                     # Add to sources and raw documents
@@ -775,10 +782,10 @@ async def fetch_relevant_documents(
                         github_chunks,
                     ) = await connector_service.search_github(
                         user_query=reformulated_query,
-                        user_id=user_id,
                         search_space_id=search_space_id,
                         top_k=top_k,
-                        search_mode=search_mode,
+                        start_date=start_date,
+                        end_date=end_date,
                     )
 
                     # Add to sources and raw documents
@@ -802,10 +809,10 @@ async def fetch_relevant_documents(
                         linear_chunks,
                     ) = await connector_service.search_linear(
                         user_query=reformulated_query,
-                        user_id=user_id,
                         search_space_id=search_space_id,
                         top_k=top_k,
-                        search_mode=search_mode,
+                        start_date=start_date,
+                        end_date=end_date,
                     )
 
                     # Add to sources and raw documents
@@ -829,7 +836,6 @@ async def fetch_relevant_documents(
                         tavily_chunks,
                     ) = await connector_service.search_tavily(
                         user_query=reformulated_query,
-                        user_id=user_id,
                         search_space_id=search_space_id,
                         top_k=top_k,
                     )
@@ -855,7 +861,6 @@ async def fetch_relevant_documents(
                         searx_chunks,
                     ) = await connector_service.search_searxng(
                         user_query=reformulated_query,
-                        user_id=user_id,
                         search_space_id=search_space_id,
                         top_k=top_k,
                     )
@@ -881,7 +886,6 @@ async def fetch_relevant_documents(
                         linkup_chunks,
                     ) = await connector_service.search_linkup(
                         user_query=reformulated_query,
-                        user_id=user_id,
                         search_space_id=search_space_id,
                         mode=linkup_mode,
                     )
@@ -907,7 +911,6 @@ async def fetch_relevant_documents(
                         baidu_chunks,
                     ) = await connector_service.search_baidu(
                         user_query=reformulated_query,
-                        user_id=user_id,
                         search_space_id=search_space_id,
                         top_k=top_k,
                     )
@@ -933,10 +936,10 @@ async def fetch_relevant_documents(
                         discord_chunks,
                     ) = await connector_service.search_discord(
                         user_query=reformulated_query,
-                        user_id=user_id,
                         search_space_id=search_space_id,
                         top_k=top_k,
-                        search_mode=search_mode,
+                        start_date=start_date,
+                        end_date=end_date,
                     )
                     # Add to sources and raw documents
                     if source_object:
@@ -955,10 +958,10 @@ async def fetch_relevant_documents(
                 elif connector == "JIRA_CONNECTOR":
                     source_object, jira_chunks = await connector_service.search_jira(
                         user_query=reformulated_query,
-                        user_id=user_id,
                         search_space_id=search_space_id,
                         top_k=top_k,
-                        search_mode=search_mode,
+                        start_date=start_date,
+                        end_date=end_date,
                     )
 
                     # Add to sources and raw documents
@@ -981,10 +984,10 @@ async def fetch_relevant_documents(
                         calendar_chunks,
                     ) = await connector_service.search_google_calendar(
                         user_query=reformulated_query,
-                        user_id=user_id,
                         search_space_id=search_space_id,
                         top_k=top_k,
-                        search_mode=search_mode,
+                        start_date=start_date,
+                        end_date=end_date,
                     )
 
                     # Add to sources and raw documents
@@ -1007,10 +1010,10 @@ async def fetch_relevant_documents(
                         airtable_chunks,
                     ) = await connector_service.search_airtable(
                         user_query=reformulated_query,
-                        user_id=user_id,
                         search_space_id=search_space_id,
                         top_k=top_k,
-                        search_mode=search_mode,
+                        start_date=start_date,
+                        end_date=end_date,
                     )
 
                     # Add to sources and raw documents
@@ -1033,10 +1036,10 @@ async def fetch_relevant_documents(
                         gmail_chunks,
                     ) = await connector_service.search_google_gmail(
                         user_query=reformulated_query,
-                        user_id=user_id,
                         search_space_id=search_space_id,
                         top_k=top_k,
-                        search_mode=search_mode,
+                        start_date=start_date,
+                        end_date=end_date,
                     )
 
                     # Add to sources and raw documents
@@ -1059,10 +1062,10 @@ async def fetch_relevant_documents(
                         confluence_chunks,
                     ) = await connector_service.search_confluence(
                         user_query=reformulated_query,
-                        user_id=user_id,
                         search_space_id=search_space_id,
                         top_k=top_k,
-                        search_mode=search_mode,
+                        start_date=start_date,
+                        end_date=end_date,
                     )
 
                     # Add to sources and raw documents
@@ -1085,10 +1088,10 @@ async def fetch_relevant_documents(
                         clickup_chunks,
                     ) = await connector_service.search_clickup(
                         user_query=reformulated_query,
-                        user_id=user_id,
                         search_space_id=search_space_id,
                         top_k=top_k,
-                        search_mode=search_mode,
+                        start_date=start_date,
+                        end_date=end_date,
                     )
 
                     # Add to sources and raw documents
@@ -1112,10 +1115,10 @@ async def fetch_relevant_documents(
                         luma_chunks,
                     ) = await connector_service.search_luma(
                         user_query=reformulated_query,
-                        user_id=user_id,
                         search_space_id=search_space_id,
                         top_k=top_k,
-                        search_mode=search_mode,
+                        start_date=start_date,
+                        end_date=end_date,
                     )
 
                     # Add to sources and raw documents
@@ -1139,10 +1142,10 @@ async def fetch_relevant_documents(
                         elasticsearch_chunks,
                     ) = await connector_service.search_elasticsearch(
                         user_query=reformulated_query,
-                        user_id=user_id,
                         search_space_id=search_space_id,
                         top_k=top_k,
-                        search_mode=search_mode,
+                        start_date=start_date,
+                        end_date=end_date,
                     )
 
                     # Add to sources and raw documents
@@ -1156,6 +1159,60 @@ async def fetch_relevant_documents(
                             {
                                 "yield_value": streaming_service.format_terminal_info_delta(
                                     f"🔎 Found {len(elasticsearch_chunks)} Elasticsearch chunks related to your query"
+                                )
+                            }
+                        )
+
+                elif connector == "BOOKSTACK_CONNECTOR":
+                    (
+                        source_object,
+                        bookstack_chunks,
+                    ) = await connector_service.search_bookstack(
+                        user_query=reformulated_query,
+                        search_space_id=search_space_id,
+                        top_k=top_k,
+                        start_date=start_date,
+                        end_date=end_date,
+                    )
+
+                    # Add to sources and raw documents
+                    if source_object:
+                        all_sources.append(source_object)
+                    all_raw_documents.extend(bookstack_chunks)
+
+                    # Stream found document count
+                    if streaming_service and writer:
+                        writer(
+                            {
+                                "yield_value": streaming_service.format_terminal_info_delta(
+                                    f"📚 Found {len(bookstack_chunks)} BookStack pages related to your query"
+                                )
+                            }
+                        )
+
+                elif connector == "NOTE":
+                    (
+                        source_object,
+                        notes_chunks,
+                    ) = await connector_service.search_notes(
+                        user_query=reformulated_query,
+                        search_space_id=search_space_id,
+                        top_k=top_k,
+                        start_date=start_date,
+                        end_date=end_date,
+                    )
+
+                    # Add to sources and raw documents
+                    if source_object:
+                        all_sources.append(source_object)
+                    all_raw_documents.extend(notes_chunks)
+
+                    # Stream found document count
+                    if streaming_service and writer:
+                        writer(
+                            {
+                                "yield_value": streaming_service.format_terminal_info_delta(
+                                    f"📝 Found {len(notes_chunks)} Notes related to your query"
                                 )
                             }
                         )
@@ -1261,25 +1318,22 @@ async def fetch_relevant_documents(
             }
         )
 
-    # Deduplicate raw documents based on chunk_id or content
-    seen_chunk_ids = set()
+    # Deduplicate raw documents based on document_id (preferred) or content hash
+    seen_doc_ids = set()
     seen_content_hashes = set()
-    deduplicated_docs = []
+    deduplicated_docs: list[dict[str, Any]] = []
 
     for doc in all_raw_documents:
-        chunk_id = doc.get("chunk_id")
-        content = doc.get("content", "")
+        doc_id = (doc.get("document", {}) or {}).get("id")
+        content = doc.get("content", "") or ""
         content_hash = hash(content)
 
-        # Skip if we've seen this chunk_id or content before
-        if (
-            chunk_id and chunk_id in seen_chunk_ids
-        ) or content_hash in seen_content_hashes:
+        # Skip if we've seen this document_id or content before
+        if (doc_id and doc_id in seen_doc_ids) or content_hash in seen_content_hashes:
             continue
 
-        # Add to our tracking sets and keep this document
-        if chunk_id:
-            seen_chunk_ids.add(chunk_id)
+        if doc_id:
+            seen_doc_ids.add(doc_id)
         seen_content_hashes.add(content_hash)
         deduplicated_docs.append(doc)
 
@@ -1288,7 +1342,7 @@ async def fetch_relevant_documents(
         writer(
             {
                 "yield_value": streaming_service.format_terminal_info_delta(
-                    f"🧹 Found {len(deduplicated_docs)} unique document chunks after removing duplicates"
+                    f"🧹 Found {len(deduplicated_docs)} unique documents after removing duplicates"
                 )
             }
         )
@@ -1315,7 +1369,6 @@ async def reformulate_user_query(
         reformulated_query = await QueryService.reformulate_query_with_chat_history(
             user_query=user_query,
             session=state.db_session,
-            user_id=configuration.user_id,
             search_space_id=configuration.search_space_id,
             chat_history_str=chat_history_str,
         )
@@ -1389,7 +1442,7 @@ async def handle_qna_workflow(
                 user_selected_documents,
             ) = await fetch_documents_by_ids(
                 document_ids=configuration.document_ids_to_add_in_context,
-                user_id=configuration.user_id,
+                search_space_id=configuration.search_space_id,
                 db_session=state.db_session,
             )
 
@@ -1404,16 +1457,19 @@ async def handle_qna_workflow(
 
         # Create connector service using state db_session
         connector_service = ConnectorService(
-            state.db_session, user_id=configuration.user_id
+            state.db_session, search_space_id=configuration.search_space_id
         )
         await connector_service.initialize_counter()
 
         # Use the reformulated query as a single research question
         research_questions = [reformulated_query, user_query]
 
+        # Calculate time filter: last 2 years from now (hardcoded for now)
+        end_date = datetime.now(UTC)
+        start_date = end_date - timedelta(days=DEFAULT_TIME_FILTER_YEARS * 365)
+
         relevant_documents = await fetch_relevant_documents(
             research_questions=research_questions,
-            user_id=configuration.user_id,
             search_space_id=configuration.search_space_id,
             db_session=state.db_session,
             connectors_to_search=configuration.connectors_to_search,
@@ -1421,8 +1477,9 @@ async def handle_qna_workflow(
             state=state,
             top_k=top_k,
             connector_service=connector_service,
-            search_mode=configuration.search_mode,
             user_selected_sources=user_selected_sources,
+            start_date=start_date,
+            end_date=end_date,
         )
     except Exception as e:
         error_message = f"Error fetching relevant documents for QNA: {e!s}"
@@ -1459,14 +1516,18 @@ async def handle_qna_workflow(
             "user_query": user_query,  # Use the reformulated query
             "reformulated_query": reformulated_query,
             "relevant_documents": all_documents,  # Use combined documents
-            "user_id": configuration.user_id,
             "search_space_id": configuration.search_space_id,
             "language": configuration.language,
         }
     }
 
     # Create the state for the QNA agent (it has a different state structure)
-    qna_state = {"db_session": state.db_session, "chat_history": state.chat_history}
+    # Pass streaming_service so the QNA agent can stream tokens directly
+    qna_state = {
+        "db_session": state.db_session,
+        "chat_history": state.chat_history,
+        "streaming_service": streaming_service,
+    }
 
     try:
         writer(
@@ -1481,36 +1542,26 @@ async def handle_qna_workflow(
         complete_content = ""
         captured_reranked_documents = []
 
-        # Call the QNA agent with streaming
-        async for _chunk_type, chunk in qna_agent_graph.astream(
-            qna_state, qna_config, stream_mode=["values"]
+        # Call the QNA agent with both custom and values streaming modes
+        # - "custom" captures token-by-token streams from answer_question via writer()
+        # - "values" captures state updates including final_answer and reranked_documents
+        async for stream_mode, chunk in qna_agent_graph.astream(
+            qna_state, qna_config, stream_mode=["custom", "values"]
         ):
-            if "final_answer" in chunk:
-                new_content = chunk["final_answer"]
-                if new_content and new_content != complete_content:
-                    # Extract only the new content (delta)
-                    delta = new_content[len(complete_content) :]
-                    complete_content = new_content
+            if stream_mode == "custom":
+                # Handle custom stream events (token chunks from answer_question)
+                if isinstance(chunk, dict) and "yield_value" in chunk:
+                    # Forward the streamed token to the parent writer
+                    writer(chunk)
+            elif stream_mode == "values" and isinstance(chunk, dict):
+                # Handle state value updates
+                # Capture the final answer from state
+                if chunk.get("final_answer"):
+                    complete_content = chunk["final_answer"]
 
-                    # Stream the real-time answer if there's new content
-                    if delta:
-                        # Update terminal with progress
-                        word_count = len(complete_content.split())
-                        writer(
-                            {
-                                "yield_value": streaming_service.format_terminal_info_delta(
-                                    f"✍️ Writing answer... ({word_count} words)"
-                                )
-                            }
-                        )
-
-                        writer(
-                            {"yield_value": streaming_service.format_text_chunk(delta)}
-                        )
-
-            # Capture reranked documents from QNA agent for further question generation
-            if "reranked_documents" in chunk:
-                captured_reranked_documents = chunk["reranked_documents"]
+                # Capture reranked documents from QNA agent for further question generation
+                if chunk.get("reranked_documents"):
+                    captured_reranked_documents = chunk["reranked_documents"]
 
         # Set default if no content was received
         if not complete_content:
@@ -1551,12 +1602,11 @@ async def generate_further_questions(
     Returns:
         Dict containing the further questions in the "further_questions" key for state update.
     """
-    from app.services.llm_service import get_user_fast_llm
+    from app.services.llm_service import get_fast_llm
 
     # Get configuration and state data
     configuration = Configuration.from_runnable_config(config)
     chat_history = state.chat_history
-    user_id = configuration.user_id
     search_space_id = configuration.search_space_id
     streaming_service = state.streaming_service
 
@@ -1571,10 +1621,10 @@ async def generate_further_questions(
         }
     )
 
-    # Get user's fast LLM
-    llm = await get_user_fast_llm(state.db_session, user_id, search_space_id)
+    # Get search space's fast LLM
+    llm = await get_fast_llm(state.db_session, search_space_id)
     if not llm:
-        error_message = f"No fast LLM configured for user {user_id} in search space {search_space_id}"
+        error_message = f"No fast LLM configured for search space {search_space_id}"
         print(error_message)
         writer({"yield_value": streaming_service.format_error(error_message)})
 

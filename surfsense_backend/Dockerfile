@@ -18,6 +18,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libsm6 \
     libxext6 \
     libxrender1 \
+    dos2unix \
     && rm -rf /var/lib/apt/lists/*
 
 # Update certificates and install SSL tools
@@ -58,14 +59,15 @@ RUN python -c "try:\n    from docling.document_converter import DocumentConverte
 
 # Install Playwright browsers for web scraping if needed
 RUN pip install playwright && \
-    playwright install chromium
+    playwright install chromium --with-deps
 
 # Copy source code
 COPY . .
 
 # Copy and set permissions for entrypoint script
+# Use dos2unix to ensure LF line endings (fixes CRLF issues from Windows checkouts)
 COPY scripts/docker/entrypoint.sh /app/scripts/docker/entrypoint.sh
-RUN chmod +x /app/scripts/docker/entrypoint.sh
+RUN dos2unix /app/scripts/docker/entrypoint.sh && chmod +x /app/scripts/docker/entrypoint.sh
 
 # Prevent uvloop compatibility issues
 ENV PYTHONPATH=/app

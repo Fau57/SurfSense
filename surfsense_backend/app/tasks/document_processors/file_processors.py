@@ -27,6 +27,7 @@ from app.utils.document_converters import (
 
 from .base import (
     check_document_by_unique_identifier,
+    get_current_timestamp,
 )
 from .markdown_processor import add_received_markdown_file_document
 
@@ -100,6 +101,15 @@ async def add_received_file_document_using_unstructured(
         # Process chunks
         chunks = await create_document_chunks(file_in_markdown)
 
+        from app.utils.blocknote_converter import convert_markdown_to_blocknote
+
+        # Convert markdown to BlockNote JSON
+        blocknote_json = await convert_markdown_to_blocknote(file_in_markdown)
+        if not blocknote_json:
+            logging.warning(
+                f"Failed to convert {file_name} to BlockNote JSON, document will not be editable"
+            )
+
         # Update or create document
         if existing_document:
             # Update existing document
@@ -112,6 +122,9 @@ async def add_received_file_document_using_unstructured(
                 "ETL_SERVICE": "UNSTRUCTURED",
             }
             existing_document.chunks = chunks
+            existing_document.blocknote_document = blocknote_json
+            existing_document.content_needs_reindexing = False
+            existing_document.updated_at = get_current_timestamp()
 
             await session.commit()
             await session.refresh(existing_document)
@@ -131,6 +144,9 @@ async def add_received_file_document_using_unstructured(
                 chunks=chunks,
                 content_hash=content_hash,
                 unique_identifier_hash=unique_identifier_hash,
+                blocknote_document=blocknote_json,
+                content_needs_reindexing=False,
+                updated_at=get_current_timestamp(),
             )
 
             session.add(document)
@@ -214,6 +230,15 @@ async def add_received_file_document_using_llamacloud(
         # Process chunks
         chunks = await create_document_chunks(file_in_markdown)
 
+        from app.utils.blocknote_converter import convert_markdown_to_blocknote
+
+        # Convert markdown to BlockNote JSON
+        blocknote_json = await convert_markdown_to_blocknote(file_in_markdown)
+        if not blocknote_json:
+            logging.warning(
+                f"Failed to convert {file_name} to BlockNote JSON, document will not be editable"
+            )
+
         # Update or create document
         if existing_document:
             # Update existing document
@@ -226,6 +251,9 @@ async def add_received_file_document_using_llamacloud(
                 "ETL_SERVICE": "LLAMACLOUD",
             }
             existing_document.chunks = chunks
+            existing_document.blocknote_document = blocknote_json
+            existing_document.content_needs_reindexing = False
+            existing_document.updated_at = get_current_timestamp()
 
             await session.commit()
             await session.refresh(existing_document)
@@ -245,6 +273,9 @@ async def add_received_file_document_using_llamacloud(
                 chunks=chunks,
                 content_hash=content_hash,
                 unique_identifier_hash=unique_identifier_hash,
+                blocknote_document=blocknote_json,
+                content_needs_reindexing=False,
+                updated_at=get_current_timestamp(),
             )
 
             session.add(document)
@@ -353,6 +384,15 @@ async def add_received_file_document_using_docling(
         # Process chunks
         chunks = await create_document_chunks(file_in_markdown)
 
+        from app.utils.blocknote_converter import convert_markdown_to_blocknote
+
+        # Convert markdown to BlockNote JSON
+        blocknote_json = await convert_markdown_to_blocknote(file_in_markdown)
+        if not blocknote_json:
+            logging.warning(
+                f"Failed to convert {file_name} to BlockNote JSON, document will not be editable"
+            )
+
         # Update or create document
         if existing_document:
             # Update existing document
@@ -365,6 +405,9 @@ async def add_received_file_document_using_docling(
                 "ETL_SERVICE": "DOCLING",
             }
             existing_document.chunks = chunks
+            existing_document.blocknote_document = blocknote_json
+            existing_document.content_needs_reindexing = False
+            existing_document.updated_at = get_current_timestamp()
 
             await session.commit()
             await session.refresh(existing_document)
@@ -384,6 +427,9 @@ async def add_received_file_document_using_docling(
                 chunks=chunks,
                 content_hash=content_hash,
                 unique_identifier_hash=unique_identifier_hash,
+                blocknote_document=blocknote_json,
+                content_needs_reindexing=False,
+                updated_at=get_current_timestamp(),
             )
 
         session.add(document)

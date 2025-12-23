@@ -1,5 +1,6 @@
 import {
 	IconBook,
+	IconBooks,
 	IconBrandDiscord,
 	IconBrandElastic,
 	IconBrandGithub,
@@ -16,7 +17,16 @@ import {
 	IconTicket,
 	IconWorldWww,
 } from "@tabler/icons-react";
-import { File, Globe, Link, Microscope, Search, Sparkles, Telescope, Webhook } from "lucide-react";
+import {
+	File,
+	FileText,
+	Globe,
+	Microscope,
+	Search,
+	Sparkles,
+	Telescope,
+	Webhook,
+} from "lucide-react";
 import { EnumConnectorName } from "./connector";
 
 export const getConnectorIcon = (connectorType: EnumConnectorName | string, className?: string) => {
@@ -29,8 +39,6 @@ export const getConnectorIcon = (connectorType: EnumConnectorName | string, clas
 			return <IconLayoutKanban {...iconProps} />;
 		case EnumConnectorName.GITHUB_CONNECTOR:
 			return <IconBrandGithub {...iconProps} />;
-		case EnumConnectorName.SERPER_API:
-			return <Link {...iconProps} />;
 		case EnumConnectorName.TAVILY_API:
 			return <IconWorldWww {...iconProps} />;
 		case EnumConnectorName.SEARXNG_API:
@@ -53,19 +61,25 @@ export const getConnectorIcon = (connectorType: EnumConnectorName | string, clas
 			return <IconTable {...iconProps} />;
 		case EnumConnectorName.CONFLUENCE_CONNECTOR:
 			return <IconBook {...iconProps} />;
+		case EnumConnectorName.BOOKSTACK_CONNECTOR:
+			return <IconBooks {...iconProps} />;
 		case EnumConnectorName.CLICKUP_CONNECTOR:
 			return <IconChecklist {...iconProps} />;
 		case EnumConnectorName.LUMA_CONNECTOR:
 			return <IconSparkles {...iconProps} />;
 		case EnumConnectorName.ELASTICSEARCH_CONNECTOR:
 			return <IconBrandElastic {...iconProps} />;
+		case EnumConnectorName.WEBCRAWLER_CONNECTOR:
+			return <Globe {...iconProps} />;
 		// Additional cases for non-enum connector types
-		case "YOUTUBE_VIDEO":
-			return <IconBrandYoutube {...iconProps} />;
 		case "CRAWLED_URL":
 			return <Globe {...iconProps} />;
+		case "YOUTUBE_VIDEO":
+			return <IconBrandYoutube {...iconProps} />;
 		case "FILE":
 			return <File {...iconProps} />;
+		case "NOTE":
+			return <FileText {...iconProps} />;
 		case "EXTENSION":
 			return <Webhook {...iconProps} />;
 		case "DEEP":

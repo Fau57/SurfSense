@@ -1,28 +1,39 @@
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
-from langchain.schema import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
 
-from app.db import Chat, SearchSpace, User, UserSearchSpacePreference, get_async_session
+from app.db import (
+    Chat,
+    Permission,
+    SearchSpace,
+    SearchSpaceMembership,
+    User,
+    get_async_session,
+)
 from app.schemas import (
     AISDKChatRequest,
     ChatCreate,
     ChatRead,
     ChatReadWithoutMessages,
     ChatUpdate,
+    NewChatRequest,
 )
-from app.tasks.stream_connector_search_results import stream_connector_search_results
+from app.services.new_streaming_service import VercelStreamingService
+from app.tasks.chat.stream_connector_search_results import (
+    stream_connector_search_results,
+)
+from app.tasks.chat.stream_new_chat import stream_new_chat
 from app.users import current_active_user
-from app.utils.check_ownership import check_ownership
+from app.utils.rbac import check_permission
 from app.utils.validators import (
     validate_connectors,
     validate_document_ids,
     validate_messages,
     validate_research_mode,
-    validate_search_mode,
     validate_search_space_id,
     validate_top_k,
 )
@@ -54,50 +65,42 @@ async def handle_chat_data(
     document_ids_to_add_in_context = validate_document_ids(
         request_data.get("document_ids_to_add_in_context")
     )
-    search_mode_str = validate_search_mode(request_data.get("search_mode"))
     top_k = validate_top_k(request_data.get("top_k"))
     # print("RESQUEST DATA:", request_data)
     # print("SELECTED CONNECTORS:", selected_connectors)
 
-    # Check if the search space belongs to the current user
+    # Check if the user has chat access to the search space
     try:
-        await check_ownership(session, SearchSpace, search_space_id, user)
-        language_result = await session.execute(
-            select(UserSearchSpacePreference)
-            .options(
-                selectinload(UserSearchSpacePreference.search_space).selectinload(
-                    SearchSpace.llm_configs
-                ),
-                # Note: Removed selectinload for LLM relationships as they no longer exist
-                # Global configs (negative IDs) don't have foreign keys
-                # LLM configs are now fetched manually when needed
-            )
-            .filter(
-                UserSearchSpacePreference.search_space_id == search_space_id,
-                UserSearchSpacePreference.user_id == user.id,
-            )
+        await check_permission(
+            session,
+            user,
+            search_space_id,
+            Permission.CHATS_CREATE.value,
+            "You don't have permission to use chat in this search space",
         )
-        user_preference = language_result.scalars().first()
-        # print("UserSearchSpacePreference:", user_preference)
+
+        # Get search space with LLM configs (preferences are now stored at search space level)
+        search_space_result = await session.execute(
+            select(SearchSpace)
+            .options(selectinload(SearchSpace.llm_configs))
+            .filter(SearchSpace.id == search_space_id)
+        )
+        search_space = search_space_result.scalars().first()
 
         language = None
         llm_configs = []  # Initialize to empty list
 
-        if (
-            user_preference
-            and user_preference.search_space
-            and user_preference.search_space.llm_configs
-        ):
-            llm_configs = user_preference.search_space.llm_configs
+        if search_space and search_space.llm_configs:
+            llm_configs = search_space.llm_configs
 
-            # Manually fetch LLM configs since relationships no longer exist
-            # Check fast_llm, long_context_llm, and strategic_llm IDs
+            # Get language from configured LLM preferences
+            # LLM preferences are now stored on the SearchSpace model
             from app.config import config as app_config
 
             for llm_id in [
-                user_preference.fast_llm_id,
-                user_preference.long_context_llm_id,
-                user_preference.strategic_llm_id,
+                search_space.fast_llm_id,
+                search_space.long_context_llm_id,
+                search_space.strategic_llm_id,
             ]:
                 if llm_id is not None:
                     # Check if it's a global config (negative ID)
@@ -144,7 +147,6 @@ async def handle_chat_data(
             research_mode,
             selected_connectors,
             langchain_chat_history,
-            search_mode_str,
             document_ids_to_add_in_context,
             language,
             top_k,
@@ -155,14 +157,105 @@ async def handle_chat_data(
     return response
 
 
+@router.post("/new_chat")
+async def handle_new_chat(
+    request: NewChatRequest,
+    session: AsyncSession = Depends(get_async_session),
+    user: User = Depends(current_active_user),
+):
+    """
+    Handle new chat requests using the SurfSense deep agent.
+
+    This endpoint uses the new deep agent with the Vercel AI SDK
+    Data Stream Protocol (SSE format).
+
+    Args:
+        request: NewChatRequest containing chat_id, user_query, and search_space_id
+        session: Database session
+        user: Current authenticated user
+
+    Returns:
+        StreamingResponse with SSE formatted data
+    """
+    # Validate the user query
+    if not request.user_query or not request.user_query.strip():
+        raise HTTPException(status_code=400, detail="User query cannot be empty")
+
+    # Check if the user has chat access to the search space
+    try:
+        await check_permission(
+            session,
+            user,
+            request.search_space_id,
+            Permission.CHATS_CREATE.value,
+            "You don't have permission to use chat in this search space",
+        )
+    except HTTPException:
+        raise HTTPException(
+            status_code=403, detail="You don't have access to this search space"
+        ) from None
+
+    # Get LLM config ID from search space preferences (optional enhancement)
+    # For now, we use the default global config (-1)
+    llm_config_id = -1
+
+    # Optionally load LLM preferences from search space
+    try:
+        search_space_result = await session.execute(
+            select(SearchSpace).filter(SearchSpace.id == request.search_space_id)
+        )
+        search_space = search_space_result.scalars().first()
+
+        if search_space:
+            # Use strategic_llm_id if available, otherwise fall back to fast_llm_id
+            if search_space.strategic_llm_id is not None:
+                llm_config_id = search_space.strategic_llm_id
+            elif search_space.fast_llm_id is not None:
+                llm_config_id = search_space.fast_llm_id
+    except Exception:
+        # Fall back to default config on any error
+        pass
+
+    # Create the streaming response
+    # chat_id is used as LangGraph's thread_id for automatic chat history management
+    response = StreamingResponse(
+        stream_new_chat(
+            user_query=request.user_query.strip(),
+            user_id=user.id,
+            search_space_id=request.search_space_id,
+            chat_id=request.chat_id,
+            session=session,
+            llm_config_id=llm_config_id,
+        ),
+        media_type="text/event-stream",
+    )
+
+    # Set the required headers for Vercel AI SDK
+    headers = VercelStreamingService.get_response_headers()
+    for key, value in headers.items():
+        response.headers[key] = value
+
+    return response
+
+
 @router.post("/chats", response_model=ChatRead)
 async def create_chat(
     chat: ChatCreate,
     session: AsyncSession = Depends(get_async_session),
     user: User = Depends(current_active_user),
 ):
+    """
+    Create a new chat.
+    Requires CHATS_CREATE permission.
+    """
     try:
-        await check_ownership(session, SearchSpace, chat.search_space_id, user)
+        await check_permission(
+            session,
+            user,
+            chat.search_space_id,
+            Permission.CHATS_CREATE.value,
+            "You don't have permission to create chats in this search space",
+        )
         db_chat = Chat(**chat.model_dump())
         session.add(db_chat)
         await session.commit()
@@ -197,6 +290,10 @@ async def read_chats(
     session: AsyncSession = Depends(get_async_session),
     user: User = Depends(current_active_user),
 ):
+    """
+    List chats the user has access to.
+    Requires CHATS_READ permission for the search space(s).
+    """
     # Validate pagination parameters
     if skip < 0:
         raise HTTPException(
@@ -212,27 +309,51 @@ async def read_chats(
             status_code=400, detail="search_space_id must be a positive integer"
         )
     try:
-        # Select specific fields excluding messages
-        query = (
-            select(
-                Chat.id,
-                Chat.type,
-                Chat.title,
-                Chat.initial_connectors,
-                Chat.search_space_id,
-                Chat.created_at,
-                Chat.state_version,
-            )
-            .join(SearchSpace)
-            .filter(SearchSpace.user_id == user.id)
-        )
-
-        # Filter by search_space_id if provided
         if search_space_id is not None:
-            query = query.filter(Chat.search_space_id == search_space_id)
+            # Check permission for specific search space
+            await check_permission(
+                session,
+                user,
+                search_space_id,
+                Permission.CHATS_READ.value,
+                "You don't have permission to read chats in this search space",
+            )
+            # Select specific fields excluding messages
+            query = (
+                select(
+                    Chat.id,
+                    Chat.type,
+                    Chat.title,
+                    Chat.initial_connectors,
+                    Chat.search_space_id,
+                    Chat.created_at,
+                    Chat.state_version,
+                )
+                .filter(Chat.search_space_id == search_space_id)
+                .order_by(Chat.created_at.desc())
+            )
+        else:
+            # Get chats from all search spaces user has membership in
+            query = (
+                select(
+                    Chat.id,
+                    Chat.type,
+                    Chat.title,
+                    Chat.initial_connectors,
+                    Chat.search_space_id,
+                    Chat.created_at,
+                    Chat.state_version,
+                )
+                .join(SearchSpace)
+                .join(SearchSpaceMembership)
+                .filter(SearchSpaceMembership.user_id == user.id)
+                .order_by(Chat.created_at.desc())
+            )
 
         result = await session.execute(query.offset(skip).limit(limit))
         return result.all()
+    except HTTPException:
+        raise
     except OperationalError:
         raise HTTPException(
             status_code=503, detail="Database operation failed. Please try again later."
@@ -243,25 +364,141 @@ async def read_chats(
         ) from None
 
 
+@router.get("/chats/search", response_model=list[ChatReadWithoutMessages])
+async def search_chats(
+    title: str,
+    skip: int = 0,
+    limit: int = 100,
+    search_space_id: int | None = None,
+    session: AsyncSession = Depends(get_async_session),
+    user: User = Depends(current_active_user),
+):
+    """
+    Search chats by title substring.
+    Requires CHATS_READ permission for the search space(s).
+
+    Args:
+        title: Case-insensitive substring to match against chat titles. Required.
+        skip: Number of items to skip from the beginning. Default: 0.
+        limit: Maximum number of items to return. Default: 100.
+        search_space_id: Filter results to a specific search space. Default: None.
+        session: Database session (injected).
+        user: Current authenticated user (injected).
+
+    Returns:
+        List of chats matching the search query.
+
+    Notes:
+        - Title matching uses ILIKE (case-insensitive).
+        - Results are ordered by creation date (most recent first).
+    """
+    # Validate pagination parameters
+    if skip < 0:
+        raise HTTPException(
+            status_code=400, detail="skip must be a non-negative integer"
+        )
+
+    if limit <= 0 or limit > 1000:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 1000")
+
+    # Validate search_space_id if provided
+    if search_space_id is not None and search_space_id <= 0:
+        raise HTTPException(
+            status_code=400, detail="search_space_id must be a positive integer"
+        )
+
+    try:
+        if search_space_id is not None:
+            # Check permission for specific search space
+            await check_permission(
+                session,
+                user,
+                search_space_id,
+                Permission.CHATS_READ.value,
+                "You don't have permission to read chats in this search space",
+            )
+            # Select specific fields excluding messages
+            query = (
+                select(
+                    Chat.id,
+                    Chat.type,
+                    Chat.title,
+                    Chat.initial_connectors,
+                    Chat.search_space_id,
+                    Chat.created_at,
+                    Chat.state_version,
+                )
+                .filter(Chat.search_space_id == search_space_id)
+                .order_by(Chat.created_at.desc())
+            )
+        else:
+            # Get chats from all search spaces user has membership in
+            query = (
+                select(
+                    Chat.id,
+                    Chat.type,
+                    Chat.title,
+                    Chat.initial_connectors,
+                    Chat.search_space_id,
+                    Chat.created_at,
+                    Chat.state_version,
+                )
+                .join(SearchSpace)
+                .join(SearchSpaceMembership)
+                .filter(SearchSpaceMembership.user_id == user.id)
+                .order_by(Chat.created_at.desc())
+            )
+
+        # Apply title search filter (case-insensitive)
+        query = query.filter(Chat.title.ilike(f"%{title}%"))
+
+        result = await session.execute(query.offset(skip).limit(limit))
+        return result.all()
+    except HTTPException:
+        raise
+    except OperationalError:
+        raise HTTPException(
+            status_code=503, detail="Database operation failed. Please try again later."
+        ) from None
+    except Exception:
+        raise HTTPException(
+            status_code=500,
+            detail="An unexpected error occurred while searching chats.",
+        ) from None
+
+
 @router.get("/chats/{chat_id}", response_model=ChatRead)
 async def read_chat(
     chat_id: int,
     session: AsyncSession = Depends(get_async_session),
     user: User = Depends(current_active_user),
 ):
+    """
+    Get a specific chat by ID.
+    Requires CHATS_READ permission for the search space.
+    """
     try:
-        result = await session.execute(
-            select(Chat)
-            .join(SearchSpace)
-            .filter(Chat.id == chat_id, SearchSpace.user_id == user.id)
-        )
+        result = await session.execute(select(Chat).filter(Chat.id == chat_id))
         chat = result.scalars().first()
+
         if not chat:
             raise HTTPException(
                 status_code=404,
-                detail="Chat not found or you don't have permission to access it",
+                detail="Chat not found",
             )
+
+        # Check permission for the search space
+        await check_permission(
+            session,
+            user,
+            chat.search_space_id,
+            Permission.CHATS_READ.value,
+            "You don't have permission to read chats in this search space",
+        )
+
         return chat
+    except HTTPException:
+        raise
     except OperationalError:
         raise HTTPException(
             status_code=503, detail="Database operation failed. Please try again later."
@@ -280,8 +517,26 @@ async def update_chat(
     session: AsyncSession = Depends(get_async_session),
     user: User = Depends(current_active_user),
 ):
+    """
+    Update a chat.
+    Requires CHATS_UPDATE permission for the search space.
+    """
     try:
-        db_chat = await read_chat(chat_id, session, user)
+        result = await session.execute(select(Chat).filter(Chat.id == chat_id))
+        db_chat = result.scalars().first()
+
+        if not db_chat:
+            raise HTTPException(status_code=404, detail="Chat not found")
+
+        # Check permission for the search space
+        await check_permission(
+            session,
+            user,
+            db_chat.search_space_id,
+            Permission.CHATS_UPDATE.value,
+            "You don't have permission to update chats in this search space",
+        )
+
         update_data = chat_update.model_dump(exclude_unset=True)
         for key, value in update_data.items():
             if key == "messages":
@@ -318,8 +573,26 @@ async def delete_chat(
     session: AsyncSession = Depends(get_async_session),
     user: User = Depends(current_active_user),
 ):
+    """
+    Delete a chat.
+    Requires CHATS_DELETE permission for the search space.
+    """
     try:
-        db_chat = await read_chat(chat_id, session, user)
+        result = await session.execute(select(Chat).filter(Chat.id == chat_id))
+        db_chat = result.scalars().first()
+
+        if not db_chat:
+            raise HTTPException(status_code=404, detail="Chat not found")
+
+        # Check permission for the search space
+        await check_permission(
+            session,
+            user,
+            db_chat.search_space_id,
+            Permission.CHATS_DELETE.value,
+            "You don't have permission to delete chats in this search space",
+        )
+
         await session.delete(db_chat)
         await session.commit()
         return {"message": "Chat deleted successfully"}

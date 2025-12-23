@@ -15,7 +15,7 @@
 </div>
 
 # SurfSense
-While tools like NotebookLM and Perplexity are impressive and highly effective for conducting research on any topic/query, SurfSense elevates this capability by integrating with your personal knowledge base. It is a highly customizable AI research agent, connected to external sources such as Search Engines (SearxNG, Tavily, LinkUp), Slack, Linear, Jira, ClickUp, Confluence, Gmail, Notion, YouTube, GitHub, Discord, Airtable, Google Calendar, Luma, Elasticsearch and more to come.
+While tools like NotebookLM and Perplexity are impressive and highly effective for conducting research on any topic/query, SurfSense elevates this capability by integrating with your personal knowledge base. It is a highly customizable AI research agent, connected to external sources such as Search Engines (SearxNG, Tavily, LinkUp), Slack, Linear, Jira, ClickUp, Confluence, BookStack, Gmail, Notion, YouTube, GitHub, Discord, Airtable, Google Calendar, Luma, Elasticsearch and more to come.
 
 <div align="center">
 <a href="https://trendshift.io/repositories/13606" target="_blank"><img src="https://trendshift.io/api/badge/repositories/13606" alt="MODSetter%2FSurfSense | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
@@ -38,19 +38,24 @@ https://github.com/user-attachments/assets/a0a16566-6967-4374-ac51-9b3e07fbecd7
 ## Key Features
 
 ### 💡 **Idea**: 
-Have your own highly customizable private NotebookLM and Perplexity integrated with external sources.
+- Have your own highly customizable private NotebookLM and Perplexity integrated with external sources.
 ### 📁 **Multiple File Format Uploading Support**
-Save content from your own personal files *(Documents, images, videos and supports **50+ file extensions**)* to your own personal knowledge base .
+- Save content from your own personal files *(Documents, images, videos and supports **50+ file extensions**)* to your own personal knowledge base .
 ### 🔍 **Powerful Search**
-Quickly research or find anything in your saved content .
+- Quickly research or find anything in your saved content .
 ### 💬 **Chat with your Saved Content**
- Interact in Natural Language and get cited answers.
+- Interact in Natural Language and get cited answers.
 ### 📄 **Cited Answers**
-Get Cited answers just like Perplexity.
+- Get Cited answers just like Perplexity.
 ### 🔔 **Privacy & Local LLM Support**
-Works Flawlessly with Ollama local LLMs.
+- Works Flawlessly with Ollama local LLMs.
 ### 🏠 **Self Hostable**
-Open source and easy to deploy locally.
+- Open source and easy to deploy locally.
+### 👥 **Team Collaboration with RBAC**
+- Role-Based Access Control for Search Spaces
+- Invite team members with customizable roles (Owner, Admin, Editor, Viewer)
+- Granular permissions for documents, chats, connectors, and settings
+- Share knowledge bases securely within your organization
 ### 🎙️ Podcasts 
 - Blazingly fast podcast generation agent. (Creates a 3-minute podcast in under 20 seconds.)
 - Convert your chat conversations into engaging audio content
@@ -72,6 +77,7 @@ Open source and easy to deploy locally.
 - Jira
 - ClickUp
 - Confluence
+- BookStack
 - Notion
 - Gmail
 - Youtube Videos
@@ -85,41 +91,13 @@ Open source and easy to deploy locally.
 
 ## 📄 **Supported File Extensions**
 
-> **Note**: File format support depends on your ETL service configuration. LlamaCloud supports 50+ formats, Unstructured supports 34+ core formats, and Docling (core formats, local processing, privacy-focused, no API key).
+| ETL Service | Formats | Notes |
+|-------------|---------|-------|
+| **LlamaCloud** | 50+ formats | Documents, presentations, spreadsheets, images |
+| **Unstructured** | 34+ formats | Core formats + email support |
+| **Docling** | Core formats | Local processing, no API key required |
 
-### Documents & Text
-**LlamaCloud**: `.pdf`, `.doc`, `.docx`, `.docm`, `.dot`, `.dotm`, `.rtf`, `.txt`, `.xml`, `.epub`, `.odt`, `.wpd`, `.pages`, `.key`, `.numbers`, `.602`, `.abw`, `.cgm`, `.cwk`, `.hwp`, `.lwp`, `.mw`, `.mcw`, `.pbd`, `.sda`, `.sdd`, `.sdp`, `.sdw`, `.sgl`, `.sti`, `.sxi`, `.sxw`, `.stw`, `.sxg`, `.uof`, `.uop`, `.uot`, `.vor`, `.wps`, `.zabw`
-
-**Unstructured**: `.doc`, `.docx`, `.odt`, `.rtf`, `.pdf`, `.xml`, `.txt`, `.md`, `.markdown`, `.rst`, `.html`, `.org`, `.epub`
-
-**Docling**: `.pdf`, `.docx`, `.html`, `.htm`, `.xhtml`, `.adoc`, `.asciidoc`
-
-### Presentations
-**LlamaCloud**: `.ppt`, `.pptx`, `.pptm`, `.pot`, `.potm`, `.potx`, `.odp`, `.key`
-
-**Unstructured**: `.ppt`, `.pptx`
-
-**Docling**: `.pptx`
-
-### Spreadsheets & Data
-**LlamaCloud**: `.xlsx`, `.xls`, `.xlsm`, `.xlsb`, `.xlw`, `.csv`, `.tsv`, `.ods`, `.fods`, `.numbers`, `.dbf`, `.123`, `.dif`, `.sylk`, `.slk`, `.prn`, `.et`, `.uos1`, `.uos2`, `.wk1`, `.wk2`, `.wk3`, `.wk4`, `.wks`, `.wq1`, `.wq2`, `.wb1`, `.wb2`, `.wb3`, `.qpw`, `.xlr`, `.eth`
-
-**Unstructured**: `.xls`, `.xlsx`, `.csv`, `.tsv`
-
-**Docling**: `.xlsx`, `.csv`
-
-### Images
-**LlamaCloud**: `.jpg`, `.jpeg`, `.png`, `.gif`, `.bmp`, `.svg`, `.tiff`, `.webp`, `.html`, `.htm`, `.web`
-
-**Unstructured**: `.jpg`, `.jpeg`, `.png`, `.bmp`, `.tiff`, `.heic`
-
-**Docling**: `.jpg`, `.jpeg`, `.png`, `.bmp`, `.tiff`, `.tif`, `.webp`
-
-### Audio & Video *(Always Supported)*
-`.mp3`, `.mpga`, `.m4a`, `.wav`, `.mp4`, `.mpeg`, `.webm`
-
-### Email & Communication
-**Unstructured**: `.eml`, `.msg`, `.p7s`
+**Audio/Video** (via STT Service): `.mp3`, `.wav`, `.mp4`, `.webm`, etc.
 
 ### 🔖 Cross Browser Extension
 - The SurfSense extension can be used to save any webpage you like.
@@ -139,37 +117,95 @@ Join the [SurfSense Discord](https://discord.gg/ejRNvftDp9) and help shape the f
 Stay up to date with our development progress and upcoming features!  
 Check out our public roadmap and contribute your ideas or feedback:
 
-**View the Roadmap:** [SurfSense Roadmap on GitHub Projects](https://github.com/users/MODSetter/projects/2)
+**📋 Roadmap Discussion:** [SurfSense 2025-2026 Roadmap: Deep Agents, Real-Time Collaboration & MCP Servers](https://github.com/MODSetter/SurfSense/discussions/565)
+
+**📊 Kanban Board:** [SurfSense Project Board](https://github.com/users/MODSetter/projects/3)
 
 
 ## How to get started?
 
+### Quick Start with Docker 🐳
+
+> [!TIP]
+> For production deployments, use the full [Docker Compose setup](https://www.surfsense.com/docs/docker-installation) which offers more control and scalability.
+
+**Linux/macOS:**
+
+```bash
+docker run -d -p 3000:3000 -p 8000:8000 \
+  -v surfsense-data:/data \
+  --name surfsense \
+  --restart unless-stopped \
+  ghcr.io/modsetter/surfsense:latest
+```
+
+**Windows (PowerShell):**
+
+```powershell
+docker run -d -p 3000:3000 -p 8000:8000 `
+  -v surfsense-data:/data `
+  --name surfsense `
+  --restart unless-stopped `
+  ghcr.io/modsetter/surfsense:latest
+```
+
+**With Custom Configuration (e.g., OpenAI Embeddings):**
+
+```bash
+docker run -d -p 3000:3000 -p 8000:8000 \
+  -v surfsense-data:/data \
+  -e EMBEDDING_MODEL=openai://text-embedding-ada-002 \
+  -e OPENAI_API_KEY=your_openai_api_key \
+  --name surfsense \
+  --restart unless-stopped \
+  ghcr.io/modsetter/surfsense:latest
+```
+
+After starting, access SurfSense at:
+- **Frontend**: [http://localhost:3000](http://localhost:3000)
+- **Backend API**: [http://localhost:8000](http://localhost:8000)
+- **API Docs**: [http://localhost:8000/docs](http://localhost:8000/docs)
+
+**Useful Commands:**
+
+```bash
+docker logs -f surfsense      # View logs
+docker stop surfsense         # Stop
+docker start surfsense        # Start
+docker rm surfsense           # Remove (data preserved in volume)
+```
+
 ### Installation Options
 
-SurfSense provides three options to get started:
+SurfSense provides multiple options to get started:
 
 1. **[SurfSense Cloud](https://www.surfsense.com/login)** - The easiest way to try SurfSense without any setup.
    - No installation required
    - Instant access to all features
    - Perfect for getting started quickly
 
-2. **[Docker Installation (Recommended for Self-Hosting)](https://www.surfsense.net/docs/docker-installation)** - Easy way to get SurfSense up and running with all dependencies containerized.
+2. **Quick Start Docker (Above)** - Single command to get SurfSense running locally.
+   - All-in-one image with PostgreSQL, Redis, and all services bundled
+   - Perfect for evaluation, development, and small deployments
+   - Data persisted via Docker volume
+
+3. **[Docker Compose (Production)](https://www.surfsense.com/docs/docker-installation)** - Full stack deployment with separate services.
    - Includes pgAdmin for database management through a web UI
    - Supports environment variable customization via `.env` file
    - Flexible deployment options (full stack or core services only)
-   - No need to manually edit configuration files between environments
+   - Better for production with separate scaling of services
 
-3. **[Manual Installation](https://www.surfsense.net/docs/manual-installation)** - For users who prefer more control over their setup or need to customize their deployment.
+4. **[Manual Installation](https://www.surfsense.com/docs/manual-installation)** - For users who prefer more control over their setup or need to customize their deployment.
 
 Docker and manual installation guides include detailed OS-specific instructions for Windows, macOS, and Linux.
 
-Before self-hosting installation, make sure to complete the [prerequisite setup steps](https://www.surfsense.net/docs/) including:
-- Auth setup
-- **File Processing ETL Service** (choose one):
+Before self-hosting installation, make sure to complete the [prerequisite setup steps](https://www.surfsense.com/docs/) including:
+- Auth setup (optional - defaults to LOCAL auth)
+- **File Processing ETL Service** (optional - defaults to Docling):
+  - Docling (default, local processing, no API key required, supports PDF, Office docs, images, HTML, CSV)
   - Unstructured.io API key (supports 34+ formats)
   - LlamaIndex API key (enhanced parsing, supports 50+ formats)
-  - Docling (local processing, no API key required, supports PDF, Office docs, images, HTML, CSV)
-- Other required API keys
+- Other API keys as needed for your use case
 
 ## Screenshots
 

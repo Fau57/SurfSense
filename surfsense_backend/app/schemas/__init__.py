@@ -6,6 +6,7 @@ from .chats import (
     ChatRead,
     ChatReadWithoutMessages,
     ChatUpdate,
+    NewChatRequest,
 )
 from .chunks import ChunkBase, ChunkCreate, ChunkRead, ChunkUpdate
 from .documents import (
@@ -27,6 +28,23 @@ from .podcasts import (
     PodcastRead,
     PodcastUpdate,
 )
+from .rbac_schemas import (
+    InviteAcceptRequest,
+    InviteAcceptResponse,
+    InviteCreate,
+    InviteInfoResponse,
+    InviteRead,
+    InviteUpdate,
+    MembershipRead,
+    MembershipReadWithUser,
+    MembershipUpdate,
+    PermissionInfo,
+    PermissionsListResponse,
+    RoleCreate,
+    RoleRead,
+    RoleUpdate,
+    UserSearchSpaceAccess,
+)
 from .search_source_connector import (
     SearchSourceConnectorBase,
     SearchSourceConnectorCreate,
@@ -38,6 +56,7 @@ from .search_space import (
     SearchSpaceCreate,
     SearchSpaceRead,
     SearchSpaceUpdate,
+    SearchSpaceWithStats,
 )
 from .users import UserCreate, UserRead, UserUpdate
 
@@ -60,6 +79,13 @@ __all__ = [
     "ExtensionDocumentContent",
     "ExtensionDocumentMetadata",
     "IDModel",
+    # RBAC schemas
+    "InviteAcceptRequest",
+    "InviteAcceptResponse",
+    "InviteCreate",
+    "InviteInfoResponse",
+    "InviteRead",
+    "InviteUpdate",
     "LLMConfigBase",
     "LLMConfigCreate",
     "LLMConfigRead",
@@ -69,12 +95,21 @@ __all__ = [
     "LogFilter",
     "LogRead",
     "LogUpdate",
+    "MembershipRead",
+    "MembershipReadWithUser",
+    "MembershipUpdate",
+    "NewChatRequest",
     "PaginatedResponse",
+    "PermissionInfo",
+    "PermissionsListResponse",
     "PodcastBase",
     "PodcastCreate",
     "PodcastGenerateRequest",
     "PodcastRead",
     "PodcastUpdate",
+    "RoleCreate",
+    "RoleRead",
+    "RoleUpdate",
     "SearchSourceConnectorBase",
     "SearchSourceConnectorCreate",
     "SearchSourceConnectorRead",
@@ -83,8 +118,10 @@ __all__ = [
     "SearchSpaceCreate",
     "SearchSpaceRead",
     "SearchSpaceUpdate",
+    "SearchSpaceWithStats",
     "TimestampModel",
     "UserCreate",
     "UserRead",
+    "UserSearchSpaceAccess",
     "UserUpdate",
 ]
