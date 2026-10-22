@@ -1,9 +1,16 @@
 """
 Elasticsearch indexer for SurfSense
+
+Implements 2-phase document status updates for real-time UI feedback:
+- Phase 1: Collect all documents and create pending documents (visible in UI immediately)
+- Phase 2: Process each document: pending → processing → ready/failed
 """
 
+import contextlib
 import json
 import logging
+import time
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -11,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
 from app.connectors.elasticsearch_connector import ElasticsearchConnector
-from app.db import Document, DocumentType, SearchSourceConnector
+from app.db import Document, DocumentStatus, DocumentType, SearchSourceConnector
 from app.services.task_logging_service import TaskLoggingService
 from app.utils.document_converters import (
     create_document_chunks,
@@ -23,7 +30,14 @@ from .base import (
     check_document_by_unique_identifier,
     check_duplicate_document_by_hash,
     get_current_timestamp,
+    safe_set_chunks,
 )
+
+# Type hint for heartbeat callback
+HeartbeatCallbackType = Callable[[int], Awaitable[None]]
+
+# Heartbeat interval in seconds
+HEARTBEAT_INTERVAL_SECONDS = 30
 
 logger = logging.getLogger(__name__)
 
@@ -31,11 +45,12 @@ logger = logging.getLogger(__name__)
 async def index_elasticsearch_documents(
     session: AsyncSession,
     connector_id: int,
-    search_space_id: int,
+    workspace_id: int,
     user_id: str,
     start_date: str,
     end_date: str,
     update_last_indexed: bool = True,
+    on_heartbeat_callback: HeartbeatCallbackType | None = None,
 ) -> tuple[int, str | None]:
     """
     Index documents from Elasticsearch into SurfSense
@@ -43,16 +58,17 @@ async def index_elasticsearch_documents(
     Args:
         session: Database session
         connector_id: Elasticsearch connector ID
-        search_space_id: Search space ID
+        workspace_id: Workspace ID
         user_id: User ID
         start_date: Start date for indexing (not used for Elasticsearch, kept for compatibility)
         end_date: End date for indexing (not used for Elasticsearch, kept for compatibility)
         update_last_indexed: Whether to update the last indexed timestamp
+        on_heartbeat_callback: Optional callback to update notification during long-running indexing.
 
     Returns:
         Tuple of (number of documents processed, error message if any)
     """
-    task_logger = TaskLoggingService(session, search_space_id)
+    task_logger = TaskLoggingService(session, workspace_id)
     log_entry = await task_logger.log_task_start(
         task_name="elasticsearch_indexing",
         source="connector_indexing_task",
@@ -154,6 +170,11 @@ async def index_elasticsearch_documents(
         )
 
         documents_processed = 0
+        documents_skipped = 0
+        documents_failed = 0
+
+        # Heartbeat tracking - update notification periodically to prevent appearing stuck
+        last_heartbeat_time = time.time()
 
         try:
             await task_logger.log_task_progress(
@@ -165,14 +186,22 @@ async def index_elasticsearch_documents(
                     "max_documents": max_documents,
                 },
             )
-            # Use scroll search for large result sets
+
+            # =======================================================================
+            # PHASE 1: Collect all documents from Elasticsearch and create pending documents
+            # This makes ALL documents visible in the UI immediately with pending status
+            # =======================================================================
+            docs_to_process = []  # List of dicts with document and ES data
+            new_documents_created = False
+            hits_collected = 0
+
             async for hit in es_connector.scroll_search(
                 index=index_name,
                 query=query,
                 size=min(max_documents, 100),  # Scroll in batches
                 fields=config.get("ELASTICSEARCH_FIELDS"),
             ):
-                if documents_processed >= max_documents:
+                if hits_collected >= max_documents:
                     break
 
                 try:
@@ -198,32 +227,18 @@ async def index_elasticsearch_documents(
 
                     if not content.strip():
                         logger.warning(f"Skipping document {doc_id} - no content found")
+                        documents_skipped += 1
                         continue
 
                     # Create content hash
-                    content_hash = generate_content_hash(content, search_space_id)
-
-                    # Build metadata
-                    metadata = {
-                        "elasticsearch_id": doc_id,
-                        "elasticsearch_index": hit.get("_index", index_name),
-                        "elasticsearch_score": hit.get("_score"),
-                        "indexed_at": datetime.now().isoformat(),
-                        "source": "ELASTICSEARCH_CONNECTOR",
-                    }
-
-                    # Add any additional metadata fields specified in config
-                    if "ELASTICSEARCH_METADATA_FIELDS" in config:
-                        for field in config["ELASTICSEARCH_METADATA_FIELDS"]:
-                            if field in source:
-                                metadata[f"es_{field}"] = source[field]
+                    content_hash = generate_content_hash(content, workspace_id)
 
                     # Build source-unique identifier and hash (prefer source id dedupe)
                     source_identifier = f"{hit.get('_index', index_name)}:{doc_id}"
                     unique_identifier_hash = generate_unique_identifier_hash(
                         DocumentType.ELASTICSEARCH_CONNECTOR,
                         source_identifier,
-                        search_space_id,
+                        workspace_id,
                     )
 
                     # Two-step duplicate detection: first by source-unique id, then by content hash
@@ -236,96 +251,228 @@ async def index_elasticsearch_documents(
                         )
 
                     if existing_doc:
-                        # If content is unchanged, skip. Otherwise update the existing document.
+                        # If content is unchanged, skip. Otherwise queue for update.
                         if existing_doc.content_hash == content_hash:
+                            # Ensure status is ready (might have been stuck in processing/pending)
+                            if not DocumentStatus.is_state(
+                                existing_doc.status, DocumentStatus.READY
+                            ):
+                                existing_doc.status = DocumentStatus.ready()
                             logger.info(
                                 f"Skipping ES doc {doc_id} — already indexed (doc id {existing_doc.id})"
                             )
-                            continue
-                        else:
-                            logger.info(
-                                f"Updating existing document {existing_doc.id} for ES doc {doc_id}"
-                            )
-                            existing_doc.title = title
-                            existing_doc.content = content
-                            existing_doc.content_hash = content_hash
-                            existing_doc.document_metadata = metadata
-                            existing_doc.unique_identifier_hash = unique_identifier_hash
-                            chunks = await create_document_chunks(content)
-                            existing_doc.chunks = chunks
-                            existing_doc.updated_at = get_current_timestamp()
-                            await session.flush()
-                            documents_processed += 1
-                            if documents_processed % 10 == 0:
-                                await session.commit()
+                            documents_skipped += 1
                             continue
 
-                    # Create document
+                        # Queue existing document for update (will be set to processing in Phase 2)
+                        docs_to_process.append(
+                            {
+                                "document": existing_doc,
+                                "is_new": False,
+                                "doc_id": doc_id,
+                                "title": title,
+                                "content": content,
+                                "content_hash": content_hash,
+                                "unique_identifier_hash": unique_identifier_hash,
+                                "hit": hit,
+                                "source": source,
+                            }
+                        )
+                        hits_collected += 1
+                        continue
+
+                    # Build metadata for new document
+                    metadata = {
+                        "elasticsearch_id": doc_id,
+                        "elasticsearch_index": hit.get("_index", index_name),
+                        "elasticsearch_score": hit.get("_score"),
+                        "source": "ELASTICSEARCH_CONNECTOR",
+                        "connector_id": connector_id,
+                    }
+
+                    # Add any additional metadata fields specified in config
+                    if "ELASTICSEARCH_METADATA_FIELDS" in config:
+                        for field in config["ELASTICSEARCH_METADATA_FIELDS"]:
+                            if field in source:
+                                metadata[f"es_{field}"] = source[field]
+
+                    # Create new document with PENDING status (visible in UI immediately)
                     document = Document(
                         title=title,
-                        content=content,
-                        content_hash=content_hash,
+                        content="Pending...",  # Placeholder until processed
+                        content_hash=unique_identifier_hash,  # Temporary unique value - updated when ready
                         unique_identifier_hash=unique_identifier_hash,
                         document_type=DocumentType.ELASTICSEARCH_CONNECTOR,
                         document_metadata=metadata,
-                        search_space_id=search_space_id,
+                        workspace_id=workspace_id,
+                        embedding=None,
+                        chunks=[],  # Empty at creation - safe for async
+                        status=DocumentStatus.pending(),  # Pending until processing starts
                         updated_at=get_current_timestamp(),
+                        created_by_id=user_id,
+                        connector_id=connector_id,
                     )
-
-                    # Create chunks and attach to document (persist via relationship)
-                    chunks = await create_document_chunks(content)
-                    document.chunks = chunks
                     session.add(document)
-                    await session.flush()
+                    new_documents_created = True
+
+                    docs_to_process.append(
+                        {
+                            "document": document,
+                            "is_new": True,
+                            "doc_id": doc_id,
+                            "title": title,
+                            "content": content,
+                            "content_hash": content_hash,
+                            "unique_identifier_hash": unique_identifier_hash,
+                            "hit": hit,
+                            "source": source,
+                        }
+                    )
+                    hits_collected += 1
+
+                except Exception as e:
+                    logger.error(f"Error in Phase 1 for ES doc: {e!s}", exc_info=True)
+                    documents_failed += 1
+                    continue
+
+            # Commit all pending documents - they all appear in UI now
+            if new_documents_created:
+                logger.info(
+                    f"Phase 1: Committing {len([d for d in docs_to_process if d['is_new']])} pending documents"
+                )
+                await session.commit()
+
+            # =======================================================================
+            # PHASE 2: Process each document one by one
+            # Each document transitions: pending → processing → ready/failed
+            # =======================================================================
+            logger.info(f"Phase 2: Processing {len(docs_to_process)} documents")
+
+            for item in docs_to_process:
+                # Send heartbeat periodically
+                if on_heartbeat_callback:
+                    current_time = time.time()
+                    if current_time - last_heartbeat_time >= HEARTBEAT_INTERVAL_SECONDS:
+                        await on_heartbeat_callback(documents_processed)
+                        last_heartbeat_time = current_time
+
+                document = item["document"]
+                try:
+                    # Set to PROCESSING and commit - shows "processing" in UI for THIS document only
+                    document.status = DocumentStatus.processing()
+                    await session.commit()
+
+                    # Build metadata
+                    metadata = {
+                        "elasticsearch_id": item["doc_id"],
+                        "elasticsearch_index": item["hit"].get("_index", index_name),
+                        "elasticsearch_score": item["hit"].get("_score"),
+                        "indexed_at": datetime.now().isoformat(),
+                        "source": "ELASTICSEARCH_CONNECTOR",
+                        "connector_id": connector_id,
+                    }
+
+                    # Add any additional metadata fields specified in config
+                    if "ELASTICSEARCH_METADATA_FIELDS" in config:
+                        for field in config["ELASTICSEARCH_METADATA_FIELDS"]:
+                            if field in item["source"]:
+                                metadata[f"es_{field}"] = item["source"][field]
+
+                    # Create chunks
+                    chunks = await create_document_chunks(item["content"])
+
+                    # Update document to READY with actual content
+                    document.title = item["title"]
+                    document.content = item["content"]
+                    document.content_hash = item["content_hash"]
+                    document.unique_identifier_hash = item["unique_identifier_hash"]
+                    document.document_metadata = metadata
+                    await safe_set_chunks(session, document, chunks)
+                    document.updated_at = get_current_timestamp()
+                    document.status = DocumentStatus.ready()
 
                     documents_processed += 1
 
+                    # Batch commit every 10 documents (for ready status updates)
                     if documents_processed % 10 == 0:
                         logger.info(
-                            f"Processed {documents_processed} Elasticsearch documents"
+                            f"Committing batch: {documents_processed} Elasticsearch documents processed so far"
                         )
                         await session.commit()
 
                 except Exception as e:
-                    msg = f"Error processing Elasticsearch document {hit.get('_id', 'unknown')}: {e}"
+                    msg = f"Error processing Elasticsearch document {item.get('doc_id', 'unknown')}: {e}"
                     logger.error(msg)
-                    await task_logger.log_task_failure(
-                        log_entry,
-                        "Document processing error",
-                        msg,
-                        {
-                            "document_id": hit.get("_id", "unknown"),
-                            "error_type": type(e).__name__,
-                        },
-                    )
+                    # Mark document as failed with reason (visible in UI)
+                    try:
+                        document.status = DocumentStatus.failed(str(e))
+                        document.updated_at = get_current_timestamp()
+                        # Commit now so the failed status survives a later rollback or
+                        # crash; otherwise the doc stays stuck in pending/processing.
+                        await session.commit()
+                    except Exception as status_error:
+                        logger.error(
+                            f"Failed to update document status to failed: {status_error}"
+                        )
+                        with contextlib.suppress(Exception):
+                            await session.rollback()
+                    documents_failed += 1
                     continue
 
-            # Final commit
-            await session.commit()
+            # CRITICAL: Always update timestamp (even if 0 documents indexed) so Zero syncs
+            # This ensures the UI shows "Last indexed" instead of "Never indexed"
+            if update_last_indexed:
+                connector.last_indexed_at = (
+                    datetime.now(UTC).isoformat().replace("+00:00", "Z")
+                )
+
+            # Final commit for any remaining documents not yet committed in batches
+            logger.info(
+                f"Final commit: Total {documents_processed} Elasticsearch documents processed"
+            )
+            try:
+                await session.commit()
+                logger.info(
+                    "Successfully committed all Elasticsearch document changes to database"
+                )
+            except Exception as e:
+                # Handle any remaining integrity errors gracefully (race conditions, etc.)
+                if (
+                    "duplicate key value violates unique constraint" in str(e).lower()
+                    or "uniqueviolationerror" in str(e).lower()
+                ):
+                    logger.warning(
+                        f"Duplicate content_hash detected during final commit. "
+                        f"This may occur if the same document was indexed by multiple connectors. "
+                        f"Rolling back and continuing. Error: {e!s}"
+                    )
+                    await session.rollback()
+                    # Don't fail the entire task - some documents may have been successfully indexed
+                else:
+                    raise
+
+            # Build warning message if there were issues
+            warning_parts = []
+            if documents_failed > 0:
+                warning_parts.append(f"{documents_failed} failed")
+            warning_message = ", ".join(warning_parts) if warning_parts else None
 
             await task_logger.log_task_success(
                 log_entry,
                 f"Successfully indexed {documents_processed} documents from Elasticsearch",
-                {"documents_indexed": documents_processed, "index": index_name},
+                {
+                    "documents_indexed": documents_processed,
+                    "documents_skipped": documents_skipped,
+                    "documents_failed": documents_failed,
+                    "index": index_name,
+                },
             )
             logger.info(
-                f"Successfully indexed {documents_processed} documents from Elasticsearch"
+                f"Elasticsearch indexing completed: {documents_processed} ready, "
+                f"{documents_skipped} skipped, {documents_failed} failed"
             )
 
-            # Update last indexed timestamp if requested
-            if update_last_indexed and documents_processed > 0:
-                # connector.last_indexed_at = datetime.now()
-                connector.last_indexed_at = (
-                    datetime.now(UTC).isoformat().replace("+00:00", "Z")
-                )
-                await session.commit()
-                await task_logger.log_task_progress(
-                    log_entry,
-                    "Updated connector.last_indexed_at",
-                    {"last_indexed_at": connector.last_indexed_at},
-                )
-
-            return documents_processed, None
+            return documents_processed, warning_message
 
         finally:
             # Clean up Elasticsearch connection

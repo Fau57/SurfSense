@@ -6,16 +6,22 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { useEffect, useState } from "react";
-import { toast } from "sonner";
+import { type ExternalToast, toast } from "sonner";
 import { registerMutationAtom } from "@/atoms/auth/auth-mutation.atoms";
+import { HomeButton } from "@/components/homepage/home/home-button";
 import { Logo } from "@/components/Logo";
+import { useRuntimeConfig } from "@/components/providers/runtime-config";
+import { Spinner } from "@/components/ui/spinner";
+import { useSession } from "@/hooks/use-session";
 import { getAuthErrorDetails, isNetworkError, shouldRetry } from "@/lib/auth-errors";
 import { AppError, ValidationError } from "@/lib/error";
+import { trackRegistrationAttempt, trackRegistrationFailure } from "@/lib/posthog/events";
 import { AmbientBackground } from "../login/AmbientBackground";
 
 export default function RegisterPage() {
 	const t = useTranslations("auth");
 	const tCommon = useTranslations("common");
+	const { authType } = useRuntimeConfig();
 	const [email, setEmail] = useState("");
 	const [password, setPassword] = useState("");
 	const [confirmPassword, setConfirmPassword] = useState("");
@@ -27,19 +33,26 @@ export default function RegisterPage() {
 		message: null,
 	});
 	const router = useRouter();
+	const session = useSession();
 	const [{ mutateAsync: register, isPending: isRegistering }] = useAtom(registerMutationAtom);
 
 	// Check authentication type and redirect if not LOCAL
 	useEffect(() => {
-		const authType = process.env.NEXT_PUBLIC_FASTAPI_BACKEND_AUTH_TYPE || "GOOGLE";
+		if (session.status === "authenticated") {
+			router.replace("/dashboard");
+			return;
+		}
 		if (authType !== "LOCAL") {
 			router.push("/login");
 		}
-	}, [router]);
+	}, [authType, router, session.status]);
 
-	const handleSubmit = async (e: React.FormEvent) => {
+	const handleSubmit = (e: React.FormEvent) => {
 		e.preventDefault();
+		submitForm();
+	};
 
+	const submitForm = async () => {
 		// Form validation
 		if (password !== confirmPassword) {
 			setError({ title: t("password_mismatch"), message: t("passwords_no_match_desc") });
@@ -52,8 +65,8 @@ export default function RegisterPage() {
 
 		setError({ title: null, message: null }); // Clear any previous errors
 
-		// Show loading toast
-		const loadingToast = toast.loading(t("creating_account"));
+		// Track registration attempt
+		trackRegistrationAttempt();
 
 		try {
 			await register({
@@ -64,9 +77,11 @@ export default function RegisterPage() {
 				is_verified: false,
 			});
 
+			// auth_registration_success is now emitted server-side
+			// (UserManager.on_after_register) — authoritative vs. optimistic.
+
 			// Success toast
 			toast.success(t("register_success"), {
-				id: loadingToast,
 				description: t("redirecting_login"),
 				duration: 2000,
 			});
@@ -81,9 +96,9 @@ export default function RegisterPage() {
 					case 403: {
 						const friendlyMessage =
 							"Registrations are currently closed. If you need access, contact your administrator.";
+						trackRegistrationFailure("Registration disabled");
 						setError({ title: "Registration is disabled", message: friendlyMessage });
 						toast.error("Registration is disabled", {
-							id: loadingToast,
 							description: friendlyMessage,
 							duration: 6000,
 						});
@@ -94,9 +109,9 @@ export default function RegisterPage() {
 				}
 
 				if (err instanceof ValidationError) {
+					trackRegistrationFailure(err.message);
 					setError({ title: err.name, message: err.message });
 					toast.error(err.name, {
-						id: loadingToast,
 						description: err.message,
 						duration: 6000,
 					});
@@ -113,6 +128,9 @@ export default function RegisterPage() {
 				errorCode = "NETWORK_ERROR";
 			}
 
+			// Track registration failure
+			trackRegistrationFailure(errorCode);
+
 			// Get detailed error information from auth-errors utility
 			const errorDetails = getAuthErrorDetails(errorCode);
 
@@ -120,8 +138,7 @@ export default function RegisterPage() {
 			setError({ title: errorDetails.title, message: errorDetails.description });
 
 			// Show error toast with conditional retry action
-			const toastOptions: any = {
-				id: loadingToast,
+			const toastOptions: ExternalToast = {
 				description: errorDetails.description,
 				duration: 6000,
 			};
@@ -130,7 +147,7 @@ export default function RegisterPage() {
 			if (shouldRetry(errorCode)) {
 				toastOptions.action = {
 					label: tCommon("retry"),
-					onClick: () => handleSubmit(e),
+					onClick: () => submitForm(),
 				};
 			}
 
@@ -141,17 +158,17 @@ export default function RegisterPage() {
 	return (
 		<div className="relative w-full overflow-hidden">
 			<AmbientBackground />
-			<div className="mx-auto flex h-screen max-w-lg flex-col items-center justify-center">
-				<Logo className="rounded-md" />
-				<h1 className="my-8 text-xl font-bold text-neutral-800 dark:text-neutral-100 md:text-4xl">
+			<div className="mx-auto flex h-screen max-w-lg flex-col items-center justify-center px-6 md:px-0">
+				<Logo priority className="h-16 w-16 md:h-32 md:w-32 rounded-md transition-all" />
+				<h1 className="mt-4 mb-6 text-xl font-bold text-neutral-800 dark:text-neutral-100 md:mt-8 md:mb-8 md:text-3xl lg:text-4xl transition-all">
 					{t("create_account")}
 				</h1>
 
 				<div className="w-full max-w-md">
-					<form onSubmit={handleSubmit} className="space-y-4">
+					<form onSubmit={handleSubmit} className="space-y-3 md:space-y-4">
 						{/* Enhanced Error Display */}
 						<AnimatePresence>
-							{error && error.title && (
+							{error?.title && (
 								<motion.div
 									initial={{ opacity: 0, y: -10, scale: 0.95 }}
 									animate={{ opacity: 1, y: 0, scale: 1 }}
@@ -181,11 +198,13 @@ export default function RegisterPage() {
 											<p className="text-sm font-semibold mb-1">{error.title}</p>
 											<p className="text-sm text-red-700 dark:text-red-300">{error.message}</p>
 										</div>
-										<button
+										<HomeButton
+											variant="ghost"
+											size="icon"
 											onClick={() => {
 												setError({ title: null, message: null });
 											}}
-											className="flex-shrink-0 text-red-500 hover:text-red-700 dark:text-red-400 dark:hover:text-red-200 transition-colors"
+											className="size-6 flex-shrink-0 text-red-500 hover:bg-transparent hover:text-red-700 dark:text-red-400 dark:hover:text-red-200"
 											aria-label="Dismiss error"
 											type="button"
 										>
@@ -204,51 +223,50 @@ export default function RegisterPage() {
 												<line x1="18" y1="6" x2="6" y2="18" />
 												<line x1="6" y1="6" x2="18" y2="18" />
 											</svg>
-										</button>
+										</HomeButton>
 									</div>
 								</motion.div>
 							)}
 						</AnimatePresence>
 
 						<div>
-							<label
-								htmlFor="email"
-								className="block text-sm font-medium text-gray-700 dark:text-gray-300"
-							>
+							<label htmlFor="email" className="block text-sm font-medium text-foreground">
 								{t("email")}
 							</label>
 							<input
 								id="email"
 								type="email"
+								autoComplete="email"
 								required
+								maxLength={254}
+								placeholder="you@example.com"
 								value={email}
 								onChange={(e) => setEmail(e.target.value)}
-								className={`mt-1 block w-full rounded-md border px-3 py-2 shadow-sm focus:outline-none focus:ring-2 focus:ring-offset-2 dark:bg-gray-800 dark:text-white transition-colors ${
+								className={`mt-1 block w-full rounded-md border px-3 py-1.5 md:py-2 shadow-sm focus:outline-none focus:ring-1 bg-background text-foreground transition-all ${
 									error.title
-										? "border-red-300 focus:border-red-500 focus:ring-red-500 dark:border-red-700"
-										: "border-gray-300 focus:border-blue-500 focus:ring-blue-500 dark:border-gray-700"
+										? "border-destructive focus:border-destructive focus:ring-destructive/40"
+										: "border-border focus:border-primary focus:ring-primary/40"
 								}`}
 								disabled={isRegistering}
 							/>
 						</div>
 
 						<div>
-							<label
-								htmlFor="password"
-								className="block text-sm font-medium text-gray-700 dark:text-gray-300"
-							>
+							<label htmlFor="password" className="block text-sm font-medium text-foreground">
 								{t("password")}
 							</label>
 							<input
 								id="password"
 								type="password"
+								autoComplete="new-password"
 								required
+								placeholder="Enter your password"
 								value={password}
 								onChange={(e) => setPassword(e.target.value)}
-								className={`mt-1 block w-full rounded-md border px-3 py-2 shadow-sm focus:outline-none focus:ring-2 focus:ring-offset-2 dark:bg-gray-800 dark:text-white transition-colors ${
+								className={`mt-1 block w-full rounded-md border px-3 py-1.5 md:py-2 shadow-sm focus:outline-none focus:ring-1 bg-background text-foreground transition-all ${
 									error.title
-										? "border-red-300 focus:border-red-500 focus:ring-red-500 dark:border-red-700"
-										: "border-gray-300 focus:border-blue-500 focus:ring-blue-500 dark:border-gray-700"
+										? "border-destructive focus:border-destructive focus:ring-destructive/40"
+										: "border-border focus:border-primary focus:ring-primary/40"
 								}`}
 								disabled={isRegistering}
 							/>
@@ -257,41 +275,46 @@ export default function RegisterPage() {
 						<div>
 							<label
 								htmlFor="confirmPassword"
-								className="block text-sm font-medium text-gray-700 dark:text-gray-300"
+								className="block text-sm font-medium text-foreground"
 							>
 								{t("confirm_password")}
 							</label>
 							<input
 								id="confirmPassword"
 								type="password"
+								autoComplete="new-password"
 								required
+								placeholder="Confirm your password"
 								value={confirmPassword}
 								onChange={(e) => setConfirmPassword(e.target.value)}
-								className={`mt-1 block w-full rounded-md border px-3 py-2 shadow-sm focus:outline-none focus:ring-2 focus:ring-offset-2 dark:bg-gray-800 dark:text-white transition-colors ${
+								className={`mt-1 block w-full rounded-md border px-3 py-1.5 md:py-2 shadow-sm focus:outline-none focus:ring-1 bg-background text-foreground transition-all ${
 									error.title
-										? "border-red-300 focus:border-red-500 focus:ring-red-500 dark:border-red-700"
-										: "border-gray-300 focus:border-blue-500 focus:ring-blue-500 dark:border-gray-700"
+										? "border-destructive focus:border-destructive focus:ring-destructive/40"
+										: "border-border focus:border-primary focus:ring-primary/40"
 								}`}
 								disabled={isRegistering}
 							/>
 						</div>
 
-						<button
+						<HomeButton
+							static
 							type="submit"
 							disabled={isRegistering}
-							className="w-full rounded-md bg-blue-600 px-4 py-2 text-white shadow-sm hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 transition-colors"
+							className="relative h-auto w-full px-4 py-1.5 text-sm md:py-2 md:text-base"
 						>
-							{isRegistering ? t("creating_account_btn") : t("register")}
-						</button>
+							<span className={isRegistering ? "invisible" : ""}>{t("register")}</span>
+							{isRegistering && (
+								<span className="absolute inset-0 flex items-center justify-center gap-2">
+									<Spinner size="sm" className="text-primary-foreground" />
+								</span>
+							)}
+						</HomeButton>
 					</form>
 
 					<div className="mt-4 text-center text-sm">
-						<p className="text-gray-600 dark:text-gray-400">
+						<p className="text-muted-foreground">
 							{t("already_have_account")}{" "}
-							<Link
-								href="/login"
-								className="font-medium text-blue-600 hover:text-blue-500 dark:text-blue-400"
-							>
+							<Link href="/login" className="font-medium text-primary hover:text-primary/90">
 								{t("sign_in")}
 							</Link>
 						</p>

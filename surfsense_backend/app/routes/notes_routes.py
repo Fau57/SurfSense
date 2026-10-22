@@ -1,18 +1,22 @@
 """
-Notes routes for creating and managing BlockNote documents.
+Notes routes for creating and managing note documents.
 """
 
 from datetime import UTC, datetime
-from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db import Document, DocumentType, Permission, User, get_async_session
+from app.auth.context import AuthContext
+from app.db import Document, DocumentType, Permission, get_async_session
+from app.knowledge_store.service import (
+    record_deleted_documents,
+    record_prepared_documents,
+)
 from app.schemas import DocumentRead, PaginatedResponse
-from app.users import current_active_user
+from app.users import get_auth_context
 from app.utils.rbac import check_permission
 
 router = APIRouter()
@@ -20,43 +24,36 @@ router = APIRouter()
 
 class CreateNoteRequest(BaseModel):
     title: str
-    blocknote_document: list[dict[str, Any]] | None = None
+    source_markdown: str | None = None
 
 
-@router.post("/search-spaces/{search_space_id}/notes", response_model=DocumentRead)
+@router.post("/workspaces/{workspace_id}/notes", response_model=DocumentRead)
 async def create_note(
-    search_space_id: int,
+    workspace_id: int,
     request: CreateNoteRequest,
     session: AsyncSession = Depends(get_async_session),
-    user: User = Depends(current_active_user),
+    auth: AuthContext = Depends(get_auth_context),
 ):
+    user = auth.user
     """
-    Create a new note (BlockNote document).
+    Create a new note document.
 
     Requires DOCUMENTS_CREATE permission.
     """
     # Check RBAC permission
     await check_permission(
         session,
-        user,
-        search_space_id,
+        auth,
+        workspace_id,
         Permission.DOCUMENTS_CREATE.value,
-        "You don't have permission to create notes in this search space",
+        "You don't have permission to create notes in this workspace",
     )
 
     if not request.title or not request.title.strip():
         raise HTTPException(status_code=400, detail="Title is required")
 
-    # Default empty BlockNote structure if not provided
-    blocknote_document = request.blocknote_document
-    if blocknote_document is None:
-        blocknote_document = [
-            {
-                "type": "paragraph",
-                "content": [],
-                "children": [],
-            }
-        ]
+    # Default empty markdown if not provided
+    source_markdown = request.source_markdown if request.source_markdown else ""
 
     # Generate content hash (use title for now, will be updated on save)
     import hashlib
@@ -64,23 +61,25 @@ async def create_note(
     content_hash = hashlib.sha256(request.title.encode()).hexdigest()
 
     # Create document with NOTE type
-
     document = Document(
-        search_space_id=search_space_id,
+        workspace_id=workspace_id,
         title=request.title.strip(),
         document_type=DocumentType.NOTE,
         content="",  # Empty initially, will be populated on first save/reindex
         content_hash=content_hash,
-        blocknote_document=blocknote_document,
+        source_markdown=source_markdown,
         content_needs_reindexing=False,  # Will be set to True on first save
         document_metadata={"NOTE": True},
         embedding=None,  # Will be generated on first reindex
         updated_at=datetime.now(UTC),
+        created_by_id=user.id,  # Track who created this note
     )
 
     session.add(document)
     await session.commit()
     await session.refresh(document)
+
+    await record_prepared_documents(session, [document])
 
     return DocumentRead(
         id=document.id,
@@ -90,43 +89,44 @@ async def create_note(
         content_hash=document.content_hash,
         unique_identifier_hash=document.unique_identifier_hash,
         document_metadata=document.document_metadata,
-        search_space_id=document.search_space_id,
+        workspace_id=document.workspace_id,
         created_at=document.created_at,
         updated_at=document.updated_at,
+        created_by_id=document.created_by_id,
     )
 
 
 @router.get(
-    "/search-spaces/{search_space_id}/notes",
+    "/workspaces/{workspace_id}/notes",
     response_model=PaginatedResponse[DocumentRead],
 )
 async def list_notes(
-    search_space_id: int,
+    workspace_id: int,
     skip: int | None = None,
     page: int | None = None,
     page_size: int = 50,
     session: AsyncSession = Depends(get_async_session),
-    user: User = Depends(current_active_user),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """
-    List all notes in a search space.
+    List all notes in a workspace.
 
     Requires DOCUMENTS_READ permission.
     """
     # Check RBAC permission
     await check_permission(
         session,
-        user,
-        search_space_id,
+        auth,
+        workspace_id,
         Permission.DOCUMENTS_READ.value,
-        "You don't have permission to read notes in this search space",
+        "You don't have permission to read notes in this workspace",
     )
 
     from sqlalchemy import func
 
     # Build query
     query = select(Document).where(
-        Document.search_space_id == search_space_id,
+        Document.workspace_id == workspace_id,
         Document.document_type == DocumentType.NOTE,
     )
 
@@ -134,7 +134,7 @@ async def list_notes(
     count_query = select(func.count()).select_from(
         select(Document)
         .where(
-            Document.search_space_id == search_space_id,
+            Document.workspace_id == workspace_id,
             Document.document_type == DocumentType.NOTE,
         )
         .subquery()
@@ -170,7 +170,7 @@ async def list_notes(
             content_hash=doc.content_hash,
             unique_identifier_hash=doc.unique_identifier_hash,
             document_metadata=doc.document_metadata,
-            search_space_id=doc.search_space_id,
+            workspace_id=doc.workspace_id,
             created_at=doc.created_at,
             updated_at=doc.updated_at,
         )
@@ -194,12 +194,12 @@ async def list_notes(
     )
 
 
-@router.delete("/search-spaces/{search_space_id}/notes/{note_id}")
+@router.delete("/workspaces/{workspace_id}/notes/{note_id}")
 async def delete_note(
-    search_space_id: int,
+    workspace_id: int,
     note_id: int,
     session: AsyncSession = Depends(get_async_session),
-    user: User = Depends(current_active_user),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """
     Delete a note.
@@ -209,17 +209,17 @@ async def delete_note(
     # Check RBAC permission
     await check_permission(
         session,
-        user,
-        search_space_id,
+        auth,
+        workspace_id,
         Permission.DOCUMENTS_DELETE.value,
-        "You don't have permission to delete notes in this search space",
+        "You don't have permission to delete notes in this workspace",
     )
 
     # Get document
     result = await session.execute(
         select(Document).where(
             Document.id == note_id,
-            Document.search_space_id == search_space_id,
+            Document.workspace_id == workspace_id,
             Document.document_type == DocumentType.NOTE,
         )
     )
@@ -227,6 +227,17 @@ async def delete_note(
 
     if not document:
         raise HTTPException(status_code=404, detail="Note not found")
+
+    # Check if note is pending or currently being processed
+    doc_state = document.status.get("state") if document.status else None
+    if doc_state in ("pending", "processing"):
+        raise HTTPException(
+            status_code=409,
+            detail="Cannot delete note while it is pending or being processed. Please wait for processing to complete.",
+        )
+
+    # Before the row goes: it is what says where the file is.
+    await record_deleted_documents(session, [document])
 
     # Delete document (chunks will be cascade deleted)
     await session.delete(document)

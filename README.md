@@ -1,351 +1,126 @@
-
-![new_header](https://github.com/user-attachments/assets/e236b764-0ddc-42ff-a1f1-8fbb3d2e0e65)
-
-
-<div align="center">
-<a href="https://discord.gg/ejRNvftDp9">
-<img src="https://img.shields.io/discord/1359368468260192417" alt="Discord">
-</a>
-</div>
-
-<div align="center">
-
-[English](README.md) | [简体中文](README.zh-CN.md)
-
-</div>
-
-# SurfSense
-While tools like NotebookLM and Perplexity are impressive and highly effective for conducting research on any topic/query, SurfSense elevates this capability by integrating with your personal knowledge base. It is a highly customizable AI research agent, connected to external sources such as Search Engines (SearxNG, Tavily, LinkUp), Slack, Linear, Jira, ClickUp, Confluence, BookStack, Gmail, Notion, YouTube, GitHub, Discord, Airtable, Google Calendar, Luma, Elasticsearch and more to come.
+<!--
+  Rationale and how to change it: plans/community-local/seo/06-repo-readme.md. Anything
+  added replaces something (AGENTS.md). The agent copy holds from v2.2.0, the first
+  release whose installers carry the agent.
+  The format table is checked against origin/dev c5ff7938a, which v2.2.0 contains; re-check
+  each cell against the release commit before a release.
+  The demo video under the header is a GitHub upload, not a file in the repo. To replace it, drag an
+  MP4 under 10 MB into any comment box in this repo, copy the user-attachments link and swap the URL.
+  Every README.<locale>.md follows this file section for section and names the app's UI in
+  the words of surfsense_local/frontend/translations/<locale>.json (Arabic: the English in
+  parentheses); change them together.
+  Time-boxed: delete the sunset callout on 18 October 2026, here and in every README.<locale>.md.
+-->
 
 <div align="center">
-<a href="https://trendshift.io/repositories/13606" target="_blank"><img src="https://trendshift.io/api/badge/repositories/13606" alt="MODSetter%2FSurfSense | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
+
+[![Stars](https://img.shields.io/github/stars/MODSetter/SurfSense?style=social)](https://github.com/MODSetter/SurfSense/stargazers)
+[![Latest release](https://img.shields.io/github/v/release/MODSetter/SurfSense?sort=semver)](https://github.com/MODSetter/SurfSense/releases)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+[![Discord](https://img.shields.io/discord/1359368468260192417?label=Discord)](https://discord.gg/ejRNvftDp9)
+
+  <a href="https://www.surfsense.com/"><img alt="SurfSense, the air-gapped open-source NotebookLM alternative" src="surfsense_web/public/homepage/banner.png" /></a>
+
+  <h1>SurfSense</h1>
+
+  <p>
+    <b>The air-gapped, open-source NotebookLM alternative.</b>
+    <br />
+    The AI agent that researches, transforms and edits your documents, on your machine.
+  </p>
+
+  <p>
+    <a href="https://www.surfsense.com/downloads"><b>Download</b></a> ·
+    <a href="#what-it-does-with-each-format">Formats</a> ·
+    <a href="#quick-start">Quick start</a> ·
+    <a href="#how-it-compares">Compare</a> ·
+    <a href="#plugins">Plugins</a> ·
+    <a href="https://www.surfsense.com/pricing">Pricing</a> ·
+    <a href="https://discord.gg/ejRNvftDp9">Discord</a>
+  </p>
+
+  <a href="https://trendshift.io/repositories/13606" target="_blank"><img src="https://trendshift.io/api/badge/repositories/13606" alt="MODSetter/SurfSense | Trendshift" width="250" height="55" /></a>
+
+  <p>
+    English | <a href="README.ar.md">العربية</a> | <a href="README.de.md">Deutsch</a> | <a href="README.es.md">Español</a> | <a href="README.fr.md">Français</a> | <a href="README.hi.md">हिन्दी</a> | <a href="README.ja.md">日本語</a> | <a href="README.ko.md">한국어</a> | <a href="README.pt-BR.md">Português</a> | <a href="README.ru.md">Русский</a> | <a href="README.zh-CN.md">简体中文</a>
+  </p>
 </div>
 
+https://github.com/user-attachments/assets/88326b9d-e763-46db-9635-75f9df9e8682
 
-# Video 
+SurfSense is a free, open-source desktop app for documents you can't upload. A privacy-focused, NotebookLM-style AI agent that researches, transforms and edits your documents, on your machine. The index stays on your disk, you pick the model, local or remote, and there is no account.
 
+| Platform | Download |
+|---|---|
+| **Windows** x64 | [SurfSense-Setup.exe](https://github.com/MODSetter/SurfSense/releases/latest/download/SurfSense-Setup.exe) |
+| **macOS** Apple Silicon | [SurfSense-arm64.dmg](https://github.com/MODSetter/SurfSense/releases/latest/download/SurfSense-arm64.dmg) |
+| **Linux** x64 | [AppImage](https://github.com/MODSetter/SurfSense/releases/latest/download/SurfSense.AppImage) · [deb](https://github.com/MODSetter/SurfSense/releases/latest/download/SurfSense.deb) |
 
-https://github.com/user-attachments/assets/d9221908-e0de-4b2f-ac3a-691cf4b202da
+> [!NOTE]
+> **Used the hosted web app?** Export your workspaces before 18 October 2026 and import them here. See [the sunset page](https://www.surfsense.com/sunset).
 
+## Quick start
 
-## Podcast Sample
+1. Install SurfSense and do the initial onboarding setup.
+2. Drop your files or folders in your sources.
+3. Ask the agent to search or extract or edit your files.
 
-https://github.com/user-attachments/assets/a0a16566-6967-4374-ac51-9b3e07fbecd7
+## What it does with each format
 
+| Format | Research (cited answers) | Create | Edit (as a copy) | Transform |
+|---|---|---|---|---|
+| **PDF** | ✓ scanned pages too³ | ✓ | Fill and flatten forms; stamp watermarks, page numbers, headers, footers | Merge, split, extract, rotate, reorder pages |
+| **Word** `.docx` | ✓ | ✓ or from your own `.docx` as a template | ✓ body text, as tracked changes and comments | To PDF¹ |
+| **Excel** `.xlsx` | ✓ the agent also reads formulas | ✓ with formulas and native charts | ✓ cell values and formulas | Analyse with pandas, chart the results |
+| **PowerPoint** `.pptx` | ✓ | ✓ or from your own `.pptx` as a template | Replace text on slides and notes; delete or duplicate slides | To PDF¹ |
+| **CSV** | ✓ | — | — | Analyse with pandas, chart the results |
+| **Images** PNG, JPEG, TIFF, BMP, WebP | ✓ text read by OCR³ | Images and infographics² | — | Place in new documents |
+| **Markdown**, plain text | ✓ | ✓ Markdown | — | — |
+| **HTML** | ✓ | ✓ web page | — | — |
+| **Recordings** WAV, MP3, FLAC, Ogg Vorbis | ✓ transcribed on your machine | — | — | — |
+| **Podcast** (audio) | — | ✓ with a transcript, voiced on your machine by default | — | — |
+| **Mind maps, flashcards, quizzes** | — | ✓ in the app | — | — |
 
+<sub>¹ With Office support (LibreOffice), turned on in Settings; it is never in the installer. ² Needs an image model, local or remote; none is chosen by default. ³ OCR reads Latin, Chinese and Japanese script.</sub>
 
+Edits, conversions and PDF tools always make a new file; your original is never changed. PDF, Word and Excel do the most today, and support for the other formats keeps improving.
 
-## Key Features
+## Plugins
 
-### 💡 **Idea**: 
-- Have your own highly customizable private NotebookLM and Perplexity integrated with external sources.
-### 📁 **Multiple File Format Uploading Support**
-- Save content from your own personal files *(Documents, images, videos and supports **50+ file extensions**)* to your own personal knowledge base .
-### 🔍 **Powerful Search**
-- Quickly research or find anything in your saved content .
-### 💬 **Chat with your Saved Content**
-- Interact in Natural Language and get cited answers.
-### 📄 **Cited Answers**
-- Get Cited answers just like Perplexity.
-### 🔔 **Privacy & Local LLM Support**
-- Works Flawlessly with Ollama local LLMs.
-### 🏠 **Self Hostable**
-- Open source and easy to deploy locally.
-### 👥 **Team Collaboration with RBAC**
-- Role-Based Access Control for Search Spaces
-- Invite team members with customizable roles (Owner, Admin, Editor, Viewer)
-- Granular permissions for documents, chats, connectors, and settings
-- Share knowledge bases securely within your organization
-### 🎙️ Podcasts 
-- Blazingly fast podcast generation agent. (Creates a 3-minute podcast in under 20 seconds.)
-- Convert your chat conversations into engaging audio content
-- Support for local TTS providers (Kokoro TTS)
-- Support for multiple TTS providers (OpenAI, Azure, Google Vertex AI)
+Connect them in **Settings › Plugins**.
 
-### 📊 **Advanced RAG Techniques**
-- Supports 100+ LLM's
-- Supports 6000+ Embedding Models.
-- Supports all major Rerankers (Pinecode, Cohere, Flashrank etc)
-- Uses Hierarchical Indices (2 tiered RAG setup).
-- Utilizes Hybrid Search (Semantic + Full Text Search combined with Reciprocal Rank Fusion).
+**By SurfSense.** They read public pages without your own accounts and need a SurfSense license: [download the app](https://www.surfsense.com/downloads) and enter your email there for a free 30-day one.
 
-### ℹ️ **External Sources**
-- Search Engines (Tavily, LinkUp)
-- SearxNG (self-hosted instances)
-- Slack
-- Linear
-- Jira
-- ClickUp
-- Confluence
-- BookStack
-- Notion
-- Gmail
-- Youtube Videos
-- GitHub
-- Discord
-- Airtable
-- Google Calendar
-- Luma
-- Elasticsearch
-- and more to come.....
+| Plugin | What it does |
+|---|---|
+| **Google Search** | Search Google and read its results, ads and related questions |
+| **Web Crawl** | Read a web page, or crawl a whole site into clean text |
+| **YouTube** | Read YouTube videos, channels and their comments |
+| **TikTok** | Read TikTok videos and their comments, search users, and see what is trending |
+| **Google Maps** | Find places on Google Maps and read their reviews |
+| **Amazon** | Read Amazon products and search results |
+| **Walmart** | Read Walmart products, search results and reviews |
+| **Indeed** | Read job listings on Indeed |
 
-## 📄 **Supported File Extensions**
+**Third-party.** MCP servers from the [plugin registry](plugins/registry), such as DeepWiki and Notion, or any you add by URL. No license needed; they stay off until you allow them.
 
-| ETL Service | Formats | Notes |
-|-------------|---------|-------|
-| **LlamaCloud** | 50+ formats | Documents, presentations, spreadsheets, images |
-| **Unstructured** | 34+ formats | Core formats + email support |
-| **Docling** | Core formats | Local processing, no API key required |
+## How it compares
 
-**Audio/Video** (via STT Service): `.mp3`, `.wav`, `.mp4`, `.webm`, etc.
+| | NotebookLM (now Gemini Notebook) | SurfSense |
+|---|---|---|
+| Runs offline / air-gapped | No | **Yes** |
+| Your documents leave your machine | Yes | **No**, unless you pick a remote model |
+| Can edit your files | No | **Yes** |
+| Open source | No | **Apache-2.0** |
+| Models | Gemini only | Any OpenAI-compatible API, or a local one |
 
-### 🔖 Cross Browser Extension
-- The SurfSense extension can be used to save any webpage you like.
-- Its main usecase is to save any webpages protected beyond authentication.
+## Community
 
+- [Discord](https://discord.gg/ejRNvftDp9) for help, [Issues](https://github.com/MODSetter/SurfSense/issues) for bugs, [Discussions](https://github.com/MODSetter/SurfSense/discussions) for ideas.
+- **Contributing:** PRs go against `dev`; see [CONTRIBUTING.md](CONTRIBUTING.md) and [`surfsense_local/`](./surfsense_local) for the dev loop. How it works is in [`docs/`](docs/README.md).
 
+<a href="https://github.com/MODSetter/SurfSense/graphs/contributors"><img src="https://contrib.rocks/image?repo=MODSetter/SurfSense" alt="SurfSense contributors" /></a>
 
-## FEATURE REQUESTS AND FUTURE
+## License
 
-
-**SurfSense is actively being developed.** While it's not yet production-ready, you can help us speed up the process.
-
-Join the [SurfSense Discord](https://discord.gg/ejRNvftDp9) and help shape the future of SurfSense!
-
-## 🚀 Roadmap
-
-Stay up to date with our development progress and upcoming features!  
-Check out our public roadmap and contribute your ideas or feedback:
-
-**📋 Roadmap Discussion:** [SurfSense 2025-2026 Roadmap: Deep Agents, Real-Time Collaboration & MCP Servers](https://github.com/MODSetter/SurfSense/discussions/565)
-
-**📊 Kanban Board:** [SurfSense Project Board](https://github.com/users/MODSetter/projects/3)
-
-
-## How to get started?
-
-### Quick Start with Docker 🐳
-
-> [!TIP]
-> For production deployments, use the full [Docker Compose setup](https://www.surfsense.com/docs/docker-installation) which offers more control and scalability.
-
-**Linux/macOS:**
-
-```bash
-docker run -d -p 3000:3000 -p 8000:8000 \
-  -v surfsense-data:/data \
-  --name surfsense \
-  --restart unless-stopped \
-  ghcr.io/modsetter/surfsense:latest
-```
-
-**Windows (PowerShell):**
-
-```powershell
-docker run -d -p 3000:3000 -p 8000:8000 `
-  -v surfsense-data:/data `
-  --name surfsense `
-  --restart unless-stopped `
-  ghcr.io/modsetter/surfsense:latest
-```
-
-**With Custom Configuration (e.g., OpenAI Embeddings):**
-
-```bash
-docker run -d -p 3000:3000 -p 8000:8000 \
-  -v surfsense-data:/data \
-  -e EMBEDDING_MODEL=openai://text-embedding-ada-002 \
-  -e OPENAI_API_KEY=your_openai_api_key \
-  --name surfsense \
-  --restart unless-stopped \
-  ghcr.io/modsetter/surfsense:latest
-```
-
-After starting, access SurfSense at:
-- **Frontend**: [http://localhost:3000](http://localhost:3000)
-- **Backend API**: [http://localhost:8000](http://localhost:8000)
-- **API Docs**: [http://localhost:8000/docs](http://localhost:8000/docs)
-
-**Useful Commands:**
-
-```bash
-docker logs -f surfsense      # View logs
-docker stop surfsense         # Stop
-docker start surfsense        # Start
-docker rm surfsense           # Remove (data preserved in volume)
-```
-
-### Installation Options
-
-SurfSense provides multiple options to get started:
-
-1. **[SurfSense Cloud](https://www.surfsense.com/login)** - The easiest way to try SurfSense without any setup.
-   - No installation required
-   - Instant access to all features
-   - Perfect for getting started quickly
-
-2. **Quick Start Docker (Above)** - Single command to get SurfSense running locally.
-   - All-in-one image with PostgreSQL, Redis, and all services bundled
-   - Perfect for evaluation, development, and small deployments
-   - Data persisted via Docker volume
-
-3. **[Docker Compose (Production)](https://www.surfsense.com/docs/docker-installation)** - Full stack deployment with separate services.
-   - Includes pgAdmin for database management through a web UI
-   - Supports environment variable customization via `.env` file
-   - Flexible deployment options (full stack or core services only)
-   - Better for production with separate scaling of services
-
-4. **[Manual Installation](https://www.surfsense.com/docs/manual-installation)** - For users who prefer more control over their setup or need to customize their deployment.
-
-Docker and manual installation guides include detailed OS-specific instructions for Windows, macOS, and Linux.
-
-Before self-hosting installation, make sure to complete the [prerequisite setup steps](https://www.surfsense.com/docs/) including:
-- Auth setup (optional - defaults to LOCAL auth)
-- **File Processing ETL Service** (optional - defaults to Docling):
-  - Docling (default, local processing, no API key required, supports PDF, Office docs, images, HTML, CSV)
-  - Unstructured.io API key (supports 34+ formats)
-  - LlamaIndex API key (enhanced parsing, supports 50+ formats)
-- Other API keys as needed for your use case
-
-## Screenshots
-
-**Research Agent** 
-
-![updated_researcher](https://github.com/user-attachments/assets/e22c5d86-f511-4c72-8c50-feba0c1561b4)
-
-**Search Spaces** 
-
-![search_spaces](https://github.com/user-attachments/assets/e254c38c-f937-44b6-9e9d-770db583d099)
-
-**Manage Documents** 
-![documents](https://github.com/user-attachments/assets/7001e306-eb06-4009-89c6-8fadfdc3fc4d)
-
-**Podcast Agent** 
-![podcasts](https://github.com/user-attachments/assets/6cb82ffd-9e14-4172-bc79-67faf34c4c1c)
-
-
-**Agent Chat** 
-
-![git_chat](https://github.com/user-attachments/assets/bb352d52-1c6d-4020-926b-722d0b98b491)
-
-**Browser Extension**
-
-![ext1](https://github.com/user-attachments/assets/1f042b7a-6349-422b-94fb-d40d0df16c40)
-
-![ext2](https://github.com/user-attachments/assets/a9b9f1aa-2677-404d-b0a0-c1b2dddf24a7)
-
-
-## Tech Stack
-
-
- ### **BackEnd** 
-
--  **FastAPI**: Modern, fast web framework for building APIs with Python
-  
--  **PostgreSQL with pgvector**: Database with vector search capabilities for similarity searches
-
--  **SQLAlchemy**: SQL toolkit and ORM (Object-Relational Mapping) for database interactions
-
--  **Alembic**: A database migrations tool for SQLAlchemy.
-
--  **FastAPI Users**: Authentication and user management with JWT and OAuth support
-
--  **LangGraph**: Framework for developing AI-agents.
-  
--  **LangChain**: Framework for developing AI-powered applications.
-
--  **LLM Integration**: Integration with LLM models through LiteLLM
-
--  **Rerankers**: Advanced result ranking for improved search relevance
-
--  **Hybrid Search**: Combines vector similarity and full-text search for optimal results using Reciprocal Rank Fusion (RRF)
-
--  **Vector Embeddings**: Document and text embeddings for semantic search
-
--  **pgvector**: PostgreSQL extension for efficient vector similarity operations
-
--  **Redis**: In-memory data structure store used as message broker and result backend for Celery
-
--  **Celery**: Distributed task queue for handling asynchronous background jobs (document processing, podcast generation, etc.)
-
--  **Flower**: Real-time monitoring and administration tool for Celery task queues
-
--  **Chonkie**: Advanced document chunking and embedding library
- - Uses `AutoEmbeddings` for flexible embedding model selection
- -  `LateChunker` for optimized document chunking based on embedding model's max sequence length
-
-
-  
----
- ### **FrontEnd**
-
--  **Next.js 15.2.3**: React framework featuring App Router, server components, automatic code-splitting, and optimized rendering.
-
--  **React 19.0.0**: JavaScript library for building user interfaces.
-
--  **TypeScript**: Static type-checking for JavaScript, enhancing code quality and developer experience.
-- **Vercel AI SDK Kit UI Stream Protocol**: To create scalable chat UI.
-
--  **Tailwind CSS 4.x**: Utility-first CSS framework for building custom UI designs.
-
--  **Shadcn**: Headless components library.
-
--  **Lucide React**: Icon set implemented as React components.
-
--  **Framer Motion**: Animation library for React.
-
--  **Sonner**: Toast notification library.
-
--  **Geist**: Font family from Vercel.
-
--  **React Hook Form**: Form state management and validation.
-
--  **Zod**: TypeScript-first schema validation with static type inference.
-
--  **@hookform/resolvers**: Resolvers for using validation libraries with React Hook Form.
-
--  **@tanstack/react-table**: Headless UI for building powerful tables & datagrids.
-
-
- ### **DevOps**
-
--  **Docker**: Container platform for consistent deployment across environments
-  
--  **Docker Compose**: Tool for defining and running multi-container Docker applications
-
--  **pgAdmin**: Web-based PostgreSQL administration tool included in Docker setup
-
-
-### **Extension** 
- Manifest v3 on Plasmo
-
-
-## Contribute 
-
-Contributions are very welcome! A contribution can be as small as a ⭐ or even finding and creating issues.
-Fine-tuning the Backend is always desired.
-
-For detailed contribution guidelines, please see our [CONTRIBUTING.md](CONTRIBUTING.md) file.
-
-## Star History
-
-<a href="https://www.star-history.com/#MODSetter/SurfSense&Date">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=MODSetter/SurfSense&type=Date&theme=dark" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=MODSetter/SurfSense&type=Date" />
-   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=MODSetter/SurfSense&type=Date" />
- </picture>
-</a>
-
----
----
-<p align="center">
-    <img 
-      src="https://github.com/user-attachments/assets/329c9bc2-6005-4aed-a629-700b5ae296b4" 
-      alt="Catalyst Project" 
-      width="200"
-    />
-</p>
-
----
----
+Apache-2.0. See [LICENSE](LICENSE).

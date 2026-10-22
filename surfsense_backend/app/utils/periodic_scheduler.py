@@ -18,30 +18,21 @@ logger = logging.getLogger(__name__)
 
 # Mapping of connector types to their corresponding Celery task names
 CONNECTOR_TASK_MAP = {
-    SearchSourceConnectorType.SLACK_CONNECTOR: "index_slack_messages",
     SearchSourceConnectorType.NOTION_CONNECTOR: "index_notion_pages",
     SearchSourceConnectorType.GITHUB_CONNECTOR: "index_github_repos",
-    SearchSourceConnectorType.LINEAR_CONNECTOR: "index_linear_issues",
-    SearchSourceConnectorType.JIRA_CONNECTOR: "index_jira_issues",
     SearchSourceConnectorType.CONFLUENCE_CONNECTOR: "index_confluence_pages",
-    SearchSourceConnectorType.CLICKUP_CONNECTOR: "index_clickup_tasks",
-    SearchSourceConnectorType.GOOGLE_CALENDAR_CONNECTOR: "index_google_calendar_events",
-    SearchSourceConnectorType.AIRTABLE_CONNECTOR: "index_airtable_records",
-    SearchSourceConnectorType.GOOGLE_GMAIL_CONNECTOR: "index_google_gmail_messages",
-    SearchSourceConnectorType.DISCORD_CONNECTOR: "index_discord_messages",
-    SearchSourceConnectorType.LUMA_CONNECTOR: "index_luma_events",
     SearchSourceConnectorType.ELASTICSEARCH_CONNECTOR: "index_elasticsearch_documents",
-    SearchSourceConnectorType.WEBCRAWLER_CONNECTOR: "index_crawled_urls",
     SearchSourceConnectorType.BOOKSTACK_CONNECTOR: "index_bookstack_pages",
 }
 
 
 def create_periodic_schedule(
     connector_id: int,
-    search_space_id: int,
+    workspace_id: int,
     user_id: str,
     connector_type: SearchSourceConnectorType,
     frequency_minutes: int,
+    connector_config: dict | None = None,
 ) -> bool:
     """
     Trigger the first indexing run immediately when periodic indexing is enabled.
@@ -52,10 +43,11 @@ def create_periodic_schedule(
 
     Args:
         connector_id: ID of the connector
-        search_space_id: ID of the search space
+        workspace_id: ID of the workspace
         user_id: User ID
         connector_type: Type of connector
         frequency_minutes: Frequency in minutes (used for logging)
+        connector_config: Optional connector config dict for validation
 
     Returns:
         True if successful, False otherwise
@@ -66,48 +58,26 @@ def create_periodic_schedule(
             f"(frequency: {frequency_minutes} minutes). Triggering first run..."
         )
 
-        # Import all indexing tasks
         from app.tasks.celery_tasks.connector_tasks import (
-            index_airtable_records_task,
             index_bookstack_pages_task,
-            index_clickup_tasks_task,
             index_confluence_pages_task,
-            index_crawled_urls_task,
-            index_discord_messages_task,
             index_elasticsearch_documents_task,
             index_github_repos_task,
-            index_google_calendar_events_task,
-            index_google_gmail_messages_task,
-            index_jira_issues_task,
-            index_linear_issues_task,
-            index_luma_events_task,
             index_notion_pages_task,
-            index_slack_messages_task,
         )
 
-        # Map connector type to task
         task_map = {
-            SearchSourceConnectorType.SLACK_CONNECTOR: index_slack_messages_task,
             SearchSourceConnectorType.NOTION_CONNECTOR: index_notion_pages_task,
             SearchSourceConnectorType.GITHUB_CONNECTOR: index_github_repos_task,
-            SearchSourceConnectorType.LINEAR_CONNECTOR: index_linear_issues_task,
-            SearchSourceConnectorType.JIRA_CONNECTOR: index_jira_issues_task,
             SearchSourceConnectorType.CONFLUENCE_CONNECTOR: index_confluence_pages_task,
-            SearchSourceConnectorType.CLICKUP_CONNECTOR: index_clickup_tasks_task,
-            SearchSourceConnectorType.GOOGLE_CALENDAR_CONNECTOR: index_google_calendar_events_task,
-            SearchSourceConnectorType.AIRTABLE_CONNECTOR: index_airtable_records_task,
-            SearchSourceConnectorType.GOOGLE_GMAIL_CONNECTOR: index_google_gmail_messages_task,
-            SearchSourceConnectorType.DISCORD_CONNECTOR: index_discord_messages_task,
-            SearchSourceConnectorType.LUMA_CONNECTOR: index_luma_events_task,
             SearchSourceConnectorType.ELASTICSEARCH_CONNECTOR: index_elasticsearch_documents_task,
-            SearchSourceConnectorType.WEBCRAWLER_CONNECTOR: index_crawled_urls_task,
             SearchSourceConnectorType.BOOKSTACK_CONNECTOR: index_bookstack_pages_task,
         }
 
         # Trigger the first run immediately
         task = task_map.get(connector_type)
         if task:
-            task.delay(connector_id, search_space_id, user_id, None, None)
+            task.delay(connector_id, workspace_id, user_id, None, None)
             logger.info(
                 f"✓ First indexing run triggered for connector {connector_id}. "
                 f"Periodic indexing will continue automatically every {frequency_minutes} minutes."
@@ -146,7 +116,7 @@ def delete_periodic_schedule(connector_id: int) -> bool:
 
 def update_periodic_schedule(
     connector_id: int,
-    search_space_id: int,
+    workspace_id: int,
     user_id: str,
     connector_type: SearchSourceConnectorType,
     frequency_minutes: int,
@@ -159,7 +129,7 @@ def update_periodic_schedule(
 
     Args:
         connector_id: ID of the connector
-        search_space_id: ID of the search space
+        workspace_id: ID of the workspace
         user_id: User ID
         connector_type: Type of connector
         frequency_minutes: New frequency in minutes
@@ -173,5 +143,5 @@ def update_periodic_schedule(
     )
     # Optionally trigger an immediate run with the new schedule
     # Uncomment the line below if you want immediate execution on schedule update
-    # return create_periodic_schedule(connector_id, search_space_id, user_id, connector_type, frequency_minutes)
+    # return create_periodic_schedule(connector_id, workspace_id, user_id, connector_type, frequency_minutes)
     return True

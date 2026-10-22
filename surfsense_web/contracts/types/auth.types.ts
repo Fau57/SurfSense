@@ -7,12 +7,12 @@ export const loginRequest = z.object({
 });
 
 export const loginResponse = z.object({
-	access_token: z.string(),
-	token_type: z.string(),
+	authenticated: z.boolean(),
+	access_expires_at: z.number(),
 });
 
 export const registerRequest = loginRequest.omit({ grant_type: true, username: true }).extend({
-	email: z.string().email("Invalid email address"),
+	email: z.email("Invalid email address"),
 	is_active: z.boolean().optional(),
 	is_superuser: z.boolean().optional(),
 	is_verified: z.boolean().optional(),
@@ -20,8 +20,7 @@ export const registerRequest = loginRequest.omit({ grant_type: true, username: t
 
 export const registerResponse = registerRequest.omit({ password: true }).extend({
 	id: z.string(),
-	pages_limit: z.number(),
-	pages_used: z.number(),
+	credit_micros_balance: z.number(),
 });
 
 export type LoginRequest = z.infer<typeof loginRequest>;

@@ -1,61 +1,97 @@
 """
 Linear connector indexer.
+
+Uses the shared IndexingPipelineService for document deduplication,
+chunking, and embedding with bounded parallel indexing.
 """
 
-from datetime import datetime
+from collections.abc import Awaitable, Callable
 
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import config
 from app.connectors.linear_connector import LinearConnector
-from app.db import Document, DocumentType, SearchSourceConnectorType
-from app.services.llm_service import get_user_long_context_llm
-from app.services.task_logging_service import TaskLoggingService
-from app.utils.document_converters import (
-    create_document_chunks,
-    generate_content_hash,
-    generate_document_summary,
-    generate_unique_identifier_hash,
+from app.db import DocumentType, SearchSourceConnectorType
+from app.indexing_pipeline.connector_document import ConnectorDocument
+from app.indexing_pipeline.document_hashing import compute_content_hash
+from app.indexing_pipeline.indexing_pipeline_service import (
+    IndexingPipelineService,
+    PlaceholderInfo,
 )
+from app.services.task_logging_service import TaskLoggingService
 
 from .base import (
     calculate_date_range,
-    check_document_by_unique_identifier,
+    check_duplicate_document_by_hash,
     get_connector_by_id,
-    get_current_timestamp,
     logger,
+    mark_connector_documents_failed,
     update_connector_last_indexed,
 )
+
+HeartbeatCallbackType = Callable[[int], Awaitable[None]]
+HEARTBEAT_INTERVAL_SECONDS = 30
+
+
+def _build_connector_doc(
+    issue: dict,
+    formatted_issue: dict,
+    issue_content: str,
+    *,
+    connector_id: int,
+    workspace_id: int,
+    user_id: str,
+) -> ConnectorDocument:
+    """Map a raw Linear issue dict to a ConnectorDocument."""
+    issue_id = issue.get("id", "")
+    issue_identifier = issue.get("identifier", "")
+    issue_title = issue.get("title", "")
+    state = formatted_issue.get("state", "Unknown")
+    priority = formatted_issue.get("priority", "Unknown")
+    comment_count = len(formatted_issue.get("comments", []))
+
+    metadata = {
+        "issue_id": issue_id,
+        "issue_identifier": issue_identifier,
+        "issue_title": issue_title,
+        "state": state,
+        "priority": priority,
+        "comment_count": comment_count,
+        "connector_id": connector_id,
+        "document_type": "Linear Issue",
+        "connector_type": "Linear",
+    }
+
+    return ConnectorDocument(
+        title=f"{issue_identifier}: {issue_title}",
+        source_markdown=issue_content,
+        unique_id=issue_id,
+        document_type=DocumentType.LINEAR_CONNECTOR,
+        workspace_id=workspace_id,
+        connector_id=connector_id,
+        created_by_id=user_id,
+        metadata=metadata,
+    )
 
 
 async def index_linear_issues(
     session: AsyncSession,
     connector_id: int,
-    search_space_id: int,
+    workspace_id: int,
     user_id: str,
     start_date: str | None = None,
     end_date: str | None = None,
     update_last_indexed: bool = True,
-) -> tuple[int, str | None]:
+    on_heartbeat_callback: HeartbeatCallbackType | None = None,
+) -> tuple[int, int, str | None]:
     """
     Index Linear issues and comments.
 
-    Args:
-        session: Database session
-        connector_id: ID of the Linear connector
-        search_space_id: ID of the search space to store documents in
-        user_id: ID of the user
-        start_date: Start date for indexing (YYYY-MM-DD format)
-        end_date: End date for indexing (YYYY-MM-DD format)
-        update_last_indexed: Whether to update the last_indexed_at timestamp (default: True)
-
     Returns:
-        Tuple containing (number of documents indexed, error message or None)
+        Tuple of (indexed_count, skipped_count, warning_or_error_message)
     """
-    task_logger = TaskLoggingService(session, search_space_id)
+    task_logger = TaskLoggingService(session, workspace_id)
 
-    # Log task start
     log_entry = await task_logger.log_task_start(
         task_name="linear_issues_indexing",
         source="connector_indexing_task",
@@ -69,7 +105,7 @@ async def index_linear_issues(
     )
 
     try:
-        # Get the connector
+        # ── Connector lookup ──────────────────────────────────────────
         await task_logger.log_task_progress(
             log_entry,
             f"Retrieving Linear connector {connector_id} from database",
@@ -89,30 +125,35 @@ async def index_linear_issues(
             )
             return (
                 0,
+                0,
                 f"Connector with ID {connector_id} not found or is not a Linear connector",
             )
 
-        # Get the Linear token from the connector config
-        linear_token = connector.config.get("LINEAR_API_KEY")
-        if not linear_token:
+        if not connector.config.get("access_token") and not connector.config.get(
+            "LINEAR_API_KEY"
+        ):
             await task_logger.log_task_failure(
                 log_entry,
-                f"Linear API token not found in connector config for connector {connector_id}",
-                "Missing Linear token",
+                f"Linear access token not found in connector config for connector {connector_id}",
+                "Missing Linear access token",
                 {"error_type": "MissingToken"},
             )
-            return 0, "Linear API token not found in connector config"
+            return 0, 0, "Linear access token not found in connector config"
 
-        # Initialize Linear client
+        # ── Client init ───────────────────────────────────────────────
         await task_logger.log_task_progress(
             log_entry,
             f"Initializing Linear client for connector {connector_id}",
             {"stage": "client_initialization"},
         )
 
-        linear_client = LinearConnector(token=linear_token)
+        linear_client = LinearConnector(session=session, connector_id=connector_id)
 
-        # Calculate date range
+        if start_date == "undefined" or start_date == "":
+            start_date = None
+        if end_date == "undefined" or end_date == "":
+            end_date = None
+
         start_date_str, end_date_str = calculate_date_range(
             connector, start_date, end_date, default_days_back=365
         )
@@ -129,37 +170,32 @@ async def index_linear_issues(
             },
         )
 
-        # Get issues within date range
+        # ── Fetch issues ──────────────────────────────────────────────
         try:
-            issues, error = linear_client.get_issues_by_date_range(
-                start_date=start_date_str, end_date=end_date_str, include_comments=True
+            issues, error = await linear_client.get_issues_by_date_range(
+                start_date=start_date_str,
+                end_date=end_date_str,
+                include_comments=True,
             )
 
             if error:
-                logger.error(f"Failed to get Linear issues: {error}")
-
-                # Don't treat "No issues found" as an error that should stop indexing
                 if "No issues found" in error:
-                    logger.info(
-                        "No issues found is not a critical error, continuing with update"
-                    )
+                    logger.info(f"No Linear issues found: {error}")
                     if update_last_indexed:
                         await update_connector_last_indexed(
                             session, connector, update_last_indexed
                         )
                         await session.commit()
-                        logger.info(
-                            f"Updated last_indexed_at to {connector.last_indexed_at} despite no issues found"
-                        )
-                    return 0, None
+                    return 0, 0, None
                 else:
-                    return 0, f"Failed to get Linear issues: {error}"
+                    logger.error(f"Failed to get Linear issues: {error}")
+                    return 0, 0, f"Failed to get Linear issues: {error}"
 
             logger.info(f"Retrieved {len(issues)} issues from Linear API")
 
         except Exception as e:
             logger.error(f"Exception when calling Linear API: {e!s}", exc_info=True)
-            return 0, f"Failed to get Linear issues: {e!s}"
+            return 0, 0, f"Failed to get Linear issues: {e!s}"
 
         if not issues:
             logger.info("No Linear issues found for the specified date range")
@@ -168,15 +204,34 @@ async def index_linear_issues(
                     session, connector, update_last_indexed
                 )
                 await session.commit()
-                logger.info(
-                    f"Updated last_indexed_at to {connector.last_indexed_at} despite no issues found"
-                )
-            return 0, None  # Return None instead of error message when no issues found
+            return 0, 0, None
 
-        # Track the number of documents indexed
-        documents_indexed = 0
+        # ── Create placeholders for instant UI feedback ───────────────
+        pipeline = IndexingPipelineService(session)
+        placeholders = [
+            PlaceholderInfo(
+                title=f"{issue.get('identifier', '')}: {issue.get('title', '')}",
+                document_type=DocumentType.LINEAR_CONNECTOR,
+                unique_id=issue.get("id", ""),
+                workspace_id=workspace_id,
+                connector_id=connector_id,
+                created_by_id=user_id,
+                metadata={
+                    "issue_id": issue.get("id", ""),
+                    "issue_identifier": issue.get("identifier", ""),
+                    "connector_id": connector_id,
+                    "connector_type": "Linear",
+                },
+            )
+            for issue in issues
+            if issue.get("id") and issue.get("title")
+        ]
+        await pipeline.create_placeholder_documents(placeholders)
+
+        # ── Build ConnectorDocuments ──────────────────────────────────
+        connector_docs: list[ConnectorDocument] = []
         documents_skipped = 0
-        skipped_issues = []
+        duplicate_content_count = 0
 
         await task_logger.log_task_progress(
             log_entry,
@@ -184,7 +239,6 @@ async def index_linear_issues(
             {"stage": "process_issues", "total_issues": len(issues)},
         )
 
-        # Process each issue
         for issue in issues:
             try:
                 issue_id = issue.get("id", "")
@@ -195,232 +249,124 @@ async def index_linear_issues(
                     logger.warning(
                         f"Skipping issue with missing ID or title: {issue_id or 'Unknown'}"
                     )
-                    skipped_issues.append(
-                        f"{issue_identifier or 'Unknown'} (missing data)"
-                    )
                     documents_skipped += 1
                     continue
 
-                # Format the issue first to get well-structured data
                 formatted_issue = linear_client.format_issue(issue)
-
-                # Convert issue to markdown format
                 issue_content = linear_client.format_issue_to_markdown(formatted_issue)
 
                 if not issue_content:
                     logger.warning(
                         f"Skipping issue with no content: {issue_identifier} - {issue_title}"
                     )
-                    skipped_issues.append(f"{issue_identifier} (no content)")
                     documents_skipped += 1
                     continue
 
-                # Generate unique identifier hash for this Linear issue
-                unique_identifier_hash = generate_unique_identifier_hash(
-                    DocumentType.LINEAR_CONNECTOR, issue_id, search_space_id
+                doc = _build_connector_doc(
+                    issue,
+                    formatted_issue,
+                    issue_content,
+                    connector_id=connector_id,
+                    workspace_id=workspace_id,
+                    user_id=user_id,
                 )
 
-                # Generate content hash
-                content_hash = generate_content_hash(issue_content, search_space_id)
-
-                # Check if document with this unique identifier already exists
-                existing_document = await check_document_by_unique_identifier(
-                    session, unique_identifier_hash
-                )
-
-                state = formatted_issue.get("state", "Unknown")
-                description = formatted_issue.get("description", "")
-                comment_count = len(formatted_issue.get("comments", []))
-
-                if existing_document:
-                    # Document exists - check if content has changed
-                    if existing_document.content_hash == content_hash:
-                        logger.info(
-                            f"Document for Linear issue {issue_identifier} unchanged. Skipping."
-                        )
-                        documents_skipped += 1
-                        continue
-                    else:
-                        # Content has changed - update the existing document
-                        logger.info(
-                            f"Content changed for Linear issue {issue_identifier}. Updating document."
-                        )
-
-                        # Generate summary with metadata
-                        user_llm = await get_user_long_context_llm(
-                            session, user_id, search_space_id
-                        )
-
-                        if user_llm:
-                            document_metadata = {
-                                "issue_id": issue_identifier,
-                                "issue_title": issue_title,
-                                "state": state,
-                                "priority": formatted_issue.get("priority", "Unknown"),
-                                "comment_count": comment_count,
-                                "document_type": "Linear Issue",
-                                "connector_type": "Linear",
-                            }
-                            (
-                                summary_content,
-                                summary_embedding,
-                            ) = await generate_document_summary(
-                                issue_content, user_llm, document_metadata
-                            )
-                        else:
-                            # Fallback to simple summary if no LLM configured
-                            if description and len(description) > 1000:
-                                description = description[:997] + "..."
-                            summary_content = f"Linear Issue {issue_identifier}: {issue_title}\n\nStatus: {state}\n\n"
-                            if description:
-                                summary_content += f"Description: {description}\n\n"
-                            summary_content += f"Comments: {comment_count}"
-                            summary_embedding = config.embedding_model_instance.embed(
-                                summary_content
-                            )
-
-                        # Process chunks
-                        chunks = await create_document_chunks(issue_content)
-
-                        # Update existing document
-                        existing_document.title = (
-                            f"Linear - {issue_identifier}: {issue_title}"
-                        )
-                        existing_document.content = summary_content
-                        existing_document.content_hash = content_hash
-                        existing_document.embedding = summary_embedding
-                        existing_document.document_metadata = {
-                            "issue_id": issue_id,
-                            "issue_identifier": issue_identifier,
-                            "issue_title": issue_title,
-                            "state": state,
-                            "comment_count": comment_count,
-                            "indexed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        }
-                        existing_document.chunks = chunks
-                        existing_document.updated_at = get_current_timestamp()
-
-                        documents_indexed += 1
-                        logger.info(
-                            f"Successfully updated Linear issue {issue_identifier}"
-                        )
-                        continue
-
-                # Document doesn't exist - create new one
-                # Generate summary with metadata
-                user_llm = await get_user_long_context_llm(
-                    session, user_id, search_space_id
-                )
-
-                if user_llm:
-                    document_metadata = {
-                        "issue_id": issue_identifier,
-                        "issue_title": issue_title,
-                        "state": state,
-                        "priority": formatted_issue.get("priority", "Unknown"),
-                        "comment_count": comment_count,
-                        "document_type": "Linear Issue",
-                        "connector_type": "Linear",
-                    }
-                    (
-                        summary_content,
-                        summary_embedding,
-                    ) = await generate_document_summary(
-                        issue_content, user_llm, document_metadata
+                with session.no_autoflush:
+                    duplicate = await check_duplicate_document_by_hash(
+                        session, compute_content_hash(doc)
                     )
-                else:
-                    # Fallback to simple summary if no LLM configured
-                    # Truncate description if it's too long for the summary
-                    if description and len(description) > 1000:
-                        description = description[:997] + "..."
-                    summary_content = f"Linear Issue {issue_identifier}: {issue_title}\n\nStatus: {state}\n\n"
-                    if description:
-                        summary_content += f"Description: {description}\n\n"
-                    summary_content += f"Comments: {comment_count}"
-                    summary_embedding = config.embedding_model_instance.embed(
-                        summary_content
-                    )
-
-                # Process chunks - using the full issue content with comments
-                chunks = await create_document_chunks(issue_content)
-
-                # Create and store new document
-                logger.info(
-                    f"Creating new document for issue {issue_identifier} - {issue_title}"
-                )
-                document = Document(
-                    search_space_id=search_space_id,
-                    title=f"Linear - {issue_identifier}: {issue_title}",
-                    document_type=DocumentType.LINEAR_CONNECTOR,
-                    document_metadata={
-                        "issue_id": issue_id,
-                        "issue_identifier": issue_identifier,
-                        "issue_title": issue_title,
-                        "state": state,
-                        "comment_count": comment_count,
-                        "indexed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    },
-                    content=summary_content,
-                    content_hash=content_hash,
-                    unique_identifier_hash=unique_identifier_hash,
-                    embedding=summary_embedding,
-                    chunks=chunks,
-                    updated_at=get_current_timestamp(),
-                )
-
-                session.add(document)
-                documents_indexed += 1
-                logger.info(
-                    f"Successfully indexed new issue {issue_identifier} - {issue_title}"
-                )
-
-                # Batch commit every 10 documents
-                if documents_indexed % 10 == 0:
+                if duplicate:
                     logger.info(
-                        f"Committing batch: {documents_indexed} Linear issues processed so far"
+                        f"Linear issue {doc.title} already indexed by another connector "
+                        f"(existing document ID: {duplicate.id}, "
+                        f"type: {duplicate.document_type}). Skipping."
                     )
-                    await session.commit()
+                    duplicate_content_count += 1
+                    documents_skipped += 1
+                    continue
+
+                connector_docs.append(doc)
 
             except Exception as e:
                 logger.error(
-                    f"Error processing issue {issue.get('identifier', 'Unknown')}: {e!s}",
+                    f"Error building ConnectorDocument for issue: {e!s}",
                     exc_info=True,
                 )
-                skipped_issues.append(
-                    f"{issue.get('identifier', 'Unknown')} (processing error)"
-                )
                 documents_skipped += 1
-                continue  # Skip this issue and continue with others
+                continue
 
-        # Update the last_indexed_at timestamp for the connector only if requested
-        total_processed = documents_indexed
-        if update_last_indexed:
-            await update_connector_last_indexed(session, connector, update_last_indexed)
+        # ── Pipeline: migrate legacy docs + parallel index ────────────
+        await pipeline.migrate_legacy_docs(connector_docs)
+        _, documents_indexed, documents_failed = await pipeline.index_batch_parallel(
+            connector_docs,
+            max_concurrency=3,
+            on_heartbeat=on_heartbeat_callback,
+            heartbeat_interval=HEARTBEAT_INTERVAL_SECONDS,
+        )
 
-        # Final commit for any remaining documents not yet committed in batches
+        # Placeholders for items skipped above (empty/duplicate/unbuildable) would
+        # otherwise stay stuck in 'pending' and undeletable. Fail them so they're
+        # recoverable. Leaves already-ready docs untouched.
+        indexed_ids = {doc.unique_id for doc in connector_docs}
+        stuck_placeholders = [
+            (p.unique_id, "Skipped during sync: no indexable content")
+            for p in placeholders
+            if p.unique_id and p.unique_id not in indexed_ids
+        ]
+        if stuck_placeholders:
+            await mark_connector_documents_failed(
+                session,
+                document_type=DocumentType.LINEAR_CONNECTOR,
+                workspace_id=workspace_id,
+                failures=stuck_placeholders,
+            )
+
+        # ── Finalize ──────────────────────────────────────────────────
+        await update_connector_last_indexed(session, connector, update_last_indexed)
+
         logger.info(f"Final commit: Total {documents_indexed} Linear issues processed")
-        await session.commit()
-        logger.info("Successfully committed all Linear document changes to database")
+        try:
+            await session.commit()
+            logger.info(
+                "Successfully committed all Linear document changes to database"
+            )
+        except Exception as e:
+            if (
+                "duplicate key value violates unique constraint" in str(e).lower()
+                or "uniqueviolationerror" in str(e).lower()
+            ):
+                logger.warning(
+                    f"Duplicate content_hash detected during final commit. "
+                    f"Rolling back and continuing. Error: {e!s}"
+                )
+                await session.rollback()
+            else:
+                raise
 
-        # Log success
+        warning_parts: list[str] = []
+        if duplicate_content_count > 0:
+            warning_parts.append(f"{duplicate_content_count} duplicate")
+        if documents_failed > 0:
+            warning_parts.append(f"{documents_failed} failed")
+        warning_message = ", ".join(warning_parts) if warning_parts else None
+
         await task_logger.log_task_success(
             log_entry,
             f"Successfully completed Linear indexing for connector {connector_id}",
             {
-                "issues_processed": total_processed,
+                "issues_processed": documents_indexed,
                 "documents_indexed": documents_indexed,
                 "documents_skipped": documents_skipped,
-                "skipped_issues_count": len(skipped_issues),
+                "documents_failed": documents_failed,
+                "duplicate_content_count": duplicate_content_count,
             },
         )
 
         logger.info(
-            f"Linear indexing completed: {documents_indexed} new issues, {documents_skipped} skipped"
+            f"Linear indexing completed: {documents_indexed} ready, "
+            f"{documents_skipped} skipped, {documents_failed} failed"
         )
-        return (
-            total_processed,
-            None,
-        )  # Return None as the error message to indicate success
+        return documents_indexed, documents_skipped, warning_message
 
     except SQLAlchemyError as db_error:
         await session.rollback()
@@ -431,7 +377,7 @@ async def index_linear_issues(
             {"error_type": "SQLAlchemyError"},
         )
         logger.error(f"Database error: {db_error!s}", exc_info=True)
-        return 0, f"Database error: {db_error!s}"
+        return 0, 0, f"Database error: {db_error!s}"
     except Exception as e:
         await session.rollback()
         await task_logger.log_task_failure(
@@ -441,4 +387,4 @@ async def index_linear_issues(
             {"error_type": type(e).__name__},
         )
         logger.error(f"Failed to index Linear issues: {e!s}", exc_info=True)
-        return 0, f"Failed to index Linear issues: {e!s}"
+        return 0, 0, f"Failed to index Linear issues: {e!s}"

@@ -2,7 +2,6 @@ import os
 
 os.environ["OAUTHLIB_RELAX_TOKEN_SCOPE"] = "1"
 
-import base64
 import json
 import logging
 from uuid import UUID
@@ -11,25 +10,60 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from google_auth_oauthlib.flow import Flow
 from pydantic import ValidationError
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.future import select
+from sqlalchemy.orm.attributes import flag_modified
 
+from app.auth.context import AuthContext
 from app.config import config
+from app.connectors.google_gmail_connector import fetch_google_user_email
 from app.db import (
     SearchSourceConnector,
     SearchSourceConnectorType,
-    User,
     get_async_session,
 )
-from app.users import current_active_user
+from app.users import require_session_context
+from app.utils.connector_naming import (
+    check_duplicate_connector,
+    generate_unique_connector_name,
+)
+from app.utils.oauth_security import (
+    OAuthStateManager,
+    TokenEncryption,
+    generate_code_verifier,
+)
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-SCOPES = ["https://www.googleapis.com/auth/calendar.readonly"]
+SCOPES = ["https://www.googleapis.com/auth/calendar.events"]
 REDIRECT_URI = config.GOOGLE_CALENDAR_REDIRECT_URI
+
+# Initialize security utilities
+_state_manager = None
+_token_encryption = None
+
+
+def get_state_manager() -> OAuthStateManager:
+    """Get or create OAuth state manager instance."""
+    global _state_manager
+    if _state_manager is None:
+        if not config.SECRET_KEY:
+            raise ValueError("SECRET_KEY must be set for OAuth security")
+        _state_manager = OAuthStateManager(config.SECRET_KEY)
+    return _state_manager
+
+
+def get_token_encryption() -> TokenEncryption:
+    """Get or create token encryption instance."""
+    global _token_encryption
+    if _token_encryption is None:
+        if not config.SECRET_KEY:
+            raise ValueError("SECRET_KEY must be set for token encryption")
+        _token_encryption = TokenEncryption(config.SECRET_KEY)
+    return _token_encryption
 
 
 def get_google_flow():
@@ -54,21 +88,30 @@ def get_google_flow():
 
 
 @router.get("/auth/google/calendar/connector/add")
-async def connect_calendar(space_id: int, user: User = Depends(current_active_user)):
+async def connect_calendar(
+    space_id: int,
+    auth: AuthContext = Depends(require_session_context),
+):
+    user = auth.user
     try:
         if not space_id:
             raise HTTPException(status_code=400, detail="space_id is required")
 
+        if not config.SECRET_KEY:
+            raise HTTPException(
+                status_code=500, detail="SECRET_KEY not configured for OAuth security."
+            )
+
         flow = get_google_flow()
 
-        # Encode space_id and user_id in state
-        state_payload = json.dumps(
-            {
-                "space_id": space_id,
-                "user_id": str(user.id),
-            }
+        code_verifier = generate_code_verifier()
+        flow.code_verifier = code_verifier
+
+        # Generate secure state parameter with HMAC signature (includes PKCE code_verifier)
+        state_manager = get_state_manager()
+        state_encoded = state_manager.generate_secure_state(
+            space_id, user.id, code_verifier=code_verifier
         )
-        state_encoded = base64.urlsafe_b64encode(state_payload.encode()).decode()
 
         auth_url, _ = flow.authorization_url(
             access_type="offline",
@@ -83,56 +126,234 @@ async def connect_calendar(space_id: int, user: User = Depends(current_active_us
         ) from e
 
 
+@router.get("/auth/google/calendar/connector/reauth")
+async def reauth_calendar(
+    space_id: int,
+    connector_id: int,
+    return_url: str | None = None,
+    auth: AuthContext = Depends(require_session_context),
+    session: AsyncSession = Depends(get_async_session),
+):
+    """Initiate Google Calendar re-authentication for an existing connector."""
+    user = auth.user
+    try:
+        result = await session.execute(
+            select(SearchSourceConnector).filter(
+                SearchSourceConnector.id == connector_id,
+                SearchSourceConnector.user_id == user.id,
+                SearchSourceConnector.workspace_id == space_id,
+                SearchSourceConnector.connector_type
+                == SearchSourceConnectorType.GOOGLE_CALENDAR_CONNECTOR,
+            )
+        )
+        connector = result.scalars().first()
+        if not connector:
+            raise HTTPException(
+                status_code=404,
+                detail="Google Calendar connector not found or access denied",
+            )
+
+        if not config.SECRET_KEY:
+            raise HTTPException(
+                status_code=500, detail="SECRET_KEY not configured for OAuth security."
+            )
+
+        flow = get_google_flow()
+
+        code_verifier = generate_code_verifier()
+        flow.code_verifier = code_verifier
+
+        state_manager = get_state_manager()
+        extra: dict = {"connector_id": connector_id, "code_verifier": code_verifier}
+        if return_url and return_url.startswith("/"):
+            extra["return_url"] = return_url
+        state_encoded = state_manager.generate_secure_state(space_id, user.id, **extra)
+
+        auth_url, _ = flow.authorization_url(
+            access_type="offline",
+            prompt="consent",
+            include_granted_scopes="true",
+            state=state_encoded,
+        )
+
+        logger.info(
+            f"Initiating Google Calendar re-auth for user {user.id}, connector {connector_id}"
+        )
+        return {"auth_url": auth_url}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to initiate Calendar re-auth: {e!s}", exc_info=True)
+        raise HTTPException(
+            status_code=500, detail=f"Failed to initiate Calendar re-auth: {e!s}"
+        ) from e
+
+
 @router.get("/auth/google/calendar/connector/callback")
 async def calendar_callback(
     request: Request,
-    code: str,
-    state: str,
+    code: str | None = None,
+    error: str | None = None,
+    state: str | None = None,
     session: AsyncSession = Depends(get_async_session),
 ):
     try:
-        # Decode and parse the state
-        decoded_state = base64.urlsafe_b64decode(state.encode()).decode()
-        data = json.loads(decoded_state)
+        # Handle OAuth errors (e.g., user denied access)
+        if error:
+            logger.warning(f"Google Calendar OAuth error: {error}")
+            # Try to decode state to get space_id for redirect, but don't fail if it's invalid
+            space_id = None
+            if state:
+                try:
+                    state_manager = get_state_manager()
+                    data = state_manager.validate_state(state)
+                    space_id = data.get("space_id")
+                except Exception:
+                    # If state is invalid, we'll redirect without space_id
+                    logger.warning("Failed to validate state in error handler")
+
+            # Redirect to frontend with error parameter
+            if space_id:
+                return RedirectResponse(
+                    url=f"{config.NEXT_FRONTEND_URL}/dashboard/{space_id}/connectors/callback?error=google_calendar_oauth_denied"
+                )
+            else:
+                return RedirectResponse(
+                    url=f"{config.NEXT_FRONTEND_URL}/dashboard?error=google_calendar_oauth_denied"
+                )
+
+        # Validate required parameters for successful flow
+        if not code:
+            raise HTTPException(status_code=400, detail="Missing authorization code")
+        if not state:
+            raise HTTPException(status_code=400, detail="Missing state parameter")
+
+        # Validate and decode state with signature verification
+        state_manager = get_state_manager()
+        try:
+            data = state_manager.validate_state(state)
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(
+                status_code=400, detail=f"Invalid state parameter: {e!s}"
+            ) from e
 
         user_id = UUID(data["user_id"])
         space_id = data["space_id"]
+        code_verifier = data.get("code_verifier")
+
+        # Validate redirect URI (security: ensure it matches configured value)
+        if not config.GOOGLE_CALENDAR_REDIRECT_URI:
+            raise HTTPException(
+                status_code=500, detail="GOOGLE_CALENDAR_REDIRECT_URI not configured"
+            )
 
         flow = get_google_flow()
+        flow.code_verifier = code_verifier
         flow.fetch_token(code=code)
 
         creds = flow.credentials
         creds_dict = json.loads(creds.to_json())
 
-        try:
-            # Check if a connector with the same type already exists for this search space and user
+        # Fetch user email
+        user_email = fetch_google_user_email(creds)
+
+        # Encrypt sensitive credentials before storing
+        token_encryption = get_token_encryption()
+
+        # Encrypt sensitive fields: token, refresh_token, client_secret
+        if creds_dict.get("token"):
+            creds_dict["token"] = token_encryption.encrypt_token(creds_dict["token"])
+        if creds_dict.get("refresh_token"):
+            creds_dict["refresh_token"] = token_encryption.encrypt_token(
+                creds_dict["refresh_token"]
+            )
+        if creds_dict.get("client_secret"):
+            creds_dict["client_secret"] = token_encryption.encrypt_token(
+                creds_dict["client_secret"]
+            )
+
+        # Mark that credentials are encrypted for backward compatibility
+        creds_dict["_token_encrypted"] = True
+
+        reauth_connector_id = data.get("connector_id")
+        reauth_return_url = data.get("return_url")
+
+        if reauth_connector_id:
             result = await session.execute(
                 select(SearchSourceConnector).filter(
-                    SearchSourceConnector.search_space_id == space_id,
+                    SearchSourceConnector.id == reauth_connector_id,
                     SearchSourceConnector.user_id == user_id,
+                    SearchSourceConnector.workspace_id == space_id,
                     SearchSourceConnector.connector_type
                     == SearchSourceConnectorType.GOOGLE_CALENDAR_CONNECTOR,
                 )
             )
-            existing_connector = result.scalars().first()
-            if existing_connector:
+            db_connector = result.scalars().first()
+            if not db_connector:
                 raise HTTPException(
-                    status_code=409,
-                    detail="A GOOGLE_CALENDAR_CONNECTOR connector already exists in this search space. Each search space can have only one connector of each type per user.",
+                    status_code=404,
+                    detail="Connector not found or access denied during re-auth",
                 )
+
+            db_connector.config = {**creds_dict}
+            flag_modified(db_connector, "config")
+            await session.commit()
+            await session.refresh(db_connector)
+
+            logger.info(
+                f"Re-authenticated Calendar connector {db_connector.id} for user {user_id}"
+            )
+            if reauth_return_url and reauth_return_url.startswith("/"):
+                return RedirectResponse(
+                    url=f"{config.NEXT_FRONTEND_URL}{reauth_return_url}"
+                )
+            return RedirectResponse(
+                url=f"{config.NEXT_FRONTEND_URL}/dashboard/{space_id}/connectors/callback?success=true&connector=google-calendar-connector&connectorId={db_connector.id}"
+            )
+
+        # Check for duplicate connector (same account already connected)
+        is_duplicate = await check_duplicate_connector(
+            session,
+            SearchSourceConnectorType.GOOGLE_CALENDAR_CONNECTOR,
+            space_id,
+            user_id,
+            user_email,
+        )
+        if is_duplicate:
+            logger.warning(
+                f"Duplicate Google Calendar connector detected for user {user_id} with email {user_email}"
+            )
+            return RedirectResponse(
+                url=f"{config.NEXT_FRONTEND_URL}/dashboard/{space_id}/connectors/callback?error=duplicate_account&connector=google-calendar-connector"
+            )
+
+        try:
+            # Generate a unique, user-friendly connector name
+            connector_name = await generate_unique_connector_name(
+                session,
+                SearchSourceConnectorType.GOOGLE_CALENDAR_CONNECTOR,
+                space_id,
+                user_id,
+                user_email,
+            )
             db_connector = SearchSourceConnector(
-                name="Google Calendar Connector",
+                name=connector_name,
                 connector_type=SearchSourceConnectorType.GOOGLE_CALENDAR_CONNECTOR,
                 config=creds_dict,
-                search_space_id=space_id,
+                workspace_id=space_id,
                 user_id=user_id,
-                is_indexable=True,
+                is_indexable=False,
             )
             session.add(db_connector)
             await session.commit()
             await session.refresh(db_connector)
+            # Redirect to the frontend with success params for indexing config
+            # Using query params to auto-open the popup with config view on new-chat page
             return RedirectResponse(
-                f"{config.NEXT_FRONTEND_URL}/dashboard/{space_id}/connectors/add/google-calendar-connector?success=true"
+                f"{config.NEXT_FRONTEND_URL}/dashboard/{space_id}/connectors/callback?success=true&connector=google-calendar-connector&connectorId={db_connector.id}"
             )
         except ValidationError as e:
             await session.rollback()
@@ -143,7 +364,7 @@ async def calendar_callback(
             await session.rollback()
             raise HTTPException(
                 status_code=409,
-                detail=f"Integrity error: A connector with this type already exists. {e!s}",
+                detail=f"Database integrity error: {e!s}",
             ) from e
         except HTTPException:
             await session.rollback()

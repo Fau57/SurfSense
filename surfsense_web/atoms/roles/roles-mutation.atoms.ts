@@ -14,13 +14,14 @@ import { queryClient } from "@/lib/query-client/client";
 
 export const createRoleMutationAtom = atomWithMutation(() => {
 	return {
+		meta: { suppressGlobalErrorToast: true },
 		mutationFn: async (request: CreateRoleRequest) => {
 			return rolesApiService.createRole(request);
 		},
 		onSuccess: (_: CreateRoleResponse, request: CreateRoleRequest) => {
 			toast.success("Role created successfully");
 			queryClient.invalidateQueries({
-				queryKey: cacheKeys.roles.all(request.search_space_id.toString()),
+				queryKey: cacheKeys.roles.all(request.workspace_id.toString()),
 			});
 		},
 		onError: () => {
@@ -31,19 +32,17 @@ export const createRoleMutationAtom = atomWithMutation(() => {
 
 export const updateRoleMutationAtom = atomWithMutation(() => {
 	return {
+		meta: { suppressGlobalErrorToast: true },
 		mutationFn: async (request: UpdateRoleRequest) => {
 			return rolesApiService.updateRole(request);
 		},
 		onSuccess: (_: UpdateRoleResponse, request: UpdateRoleRequest) => {
 			toast.success("Role updated successfully");
 			queryClient.invalidateQueries({
-				queryKey: cacheKeys.roles.all(request.search_space_id.toString()),
+				queryKey: cacheKeys.roles.all(request.workspace_id.toString()),
 			});
 			queryClient.invalidateQueries({
-				queryKey: cacheKeys.roles.byId(
-					request.search_space_id.toString(),
-					request.role_id.toString()
-				),
+				queryKey: cacheKeys.roles.byId(request.workspace_id.toString(), request.role_id.toString()),
 			});
 		},
 		onError: () => {
@@ -54,13 +53,14 @@ export const updateRoleMutationAtom = atomWithMutation(() => {
 
 export const deleteRoleMutationAtom = atomWithMutation(() => {
 	return {
+		meta: { suppressGlobalErrorToast: true },
 		mutationFn: async (request: DeleteRoleRequest) => {
 			return rolesApiService.deleteRole(request);
 		},
 		onSuccess: (_: DeleteRoleResponse, request: DeleteRoleRequest) => {
 			toast.success("Role deleted successfully");
 			queryClient.invalidateQueries({
-				queryKey: cacheKeys.roles.all(request.search_space_id.toString()),
+				queryKey: cacheKeys.roles.all(request.workspace_id.toString()),
 			});
 		},
 		onError: () => {

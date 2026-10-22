@@ -13,7 +13,10 @@ Protocol Reference:
 import json
 import uuid
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
+
+from app.services.streaming.types import ActivityData
 
 
 def generate_id() -> str:
@@ -251,7 +254,13 @@ class VercelStreamingService:
         if reasoning_id is None:
             reasoning_id = self.generate_reasoning_id()
         self.context.active_reasoning_id = reasoning_id
-        return self._format_sse({"type": "reasoning-start", "id": reasoning_id})
+        return self._format_sse(
+            {
+                "type": "reasoning-start",
+                "id": reasoning_id,
+                "startedAt": datetime.now(UTC).isoformat(),
+            }
+        )
 
     def format_reasoning_delta(self, reasoning_id: str, delta: str) -> str:
         """
@@ -286,7 +295,13 @@ class VercelStreamingService:
         """
         if self.context.active_reasoning_id == reasoning_id:
             self.context.active_reasoning_id = None
-        return self._format_sse({"type": "reasoning-end", "id": reasoning_id})
+        return self._format_sse(
+            {
+                "type": "reasoning-end",
+                "id": reasoning_id,
+                "completedAt": datetime.now(UTC).isoformat(),
+            }
+        )
 
     # =========================================================================
     # Source Parts
@@ -450,36 +465,165 @@ class VercelStreamingService:
         """
         return self.format_data("further-questions", {"questions": questions})
 
+    def format_activity(self, snapshot: ActivityData) -> str:
+        """Format one canonical backend-owned activity snapshot."""
+        return self.format_data("activity", snapshot)
+
+    def format_thread_title_update(self, thread_id: int, title: str) -> str:
+        """
+        Format a thread title update notification (SurfSense specific).
+
+        This is sent after the first response in a thread to update the
+        auto-generated title based on the conversation content.
+
+        Args:
+            thread_id: The ID of the thread being updated
+            title: The new title for the thread
+
+        Returns:
+            str: SSE formatted thread title update data part
+
+        Example output:
+            data: {"type":"data-thread-title-update","data":{"threadId":123,"title":"New Title"}}
+        """
+        return self.format_data(
+            "thread-title-update",
+            {
+                "threadId": thread_id,
+                "title": title,
+            },
+        )
+
+    def format_interrupt_request(
+        self, interrupt_value: dict[str, Any], *, interrupt_id: str | None = None
+    ) -> str:
+        """Format an interrupt request for human-in-the-loop approval.
+
+        Args:
+            interrupt_value: The interrupt payload from either:
+                - interrupt_on config: {action_requests: [...], review_configs: [...]}
+                - interrupt() primitive: {type: "...", message: "...", action: {...}, context: {...}}
+            interrupt_id: langgraph ``Interrupt.id``. The only stable handle for
+                parent-side interrupts (doom-loop, permission asks) that carry no
+                ``tool_call_id``; the frontend uses it to render and resume them.
+
+        Returns:
+            str: SSE formatted interrupt request data part
+        """
+        normalized_payload = self._normalize_interrupt_payload(interrupt_value)
+        if interrupt_id is not None:
+            normalized_payload = {**normalized_payload, "interrupt_id": interrupt_id}
+        return self.format_data("interrupt-request", normalized_payload)
+
+    def _normalize_interrupt_payload(
+        self, interrupt_value: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Normalize interrupt payloads from different sources into a consistent format.
+
+        Handles two interrupt sources:
+        1. interrupt_on config (Deep Agent built-in): Already has action_requests/review_configs
+        2. interrupt() primitive (custom tool code): Has type/action/context (message is optional)
+
+        Args:
+            interrupt_value: Raw interrupt payload from Deep Agent
+
+        Returns:
+            dict: Normalized payload with action_requests, review_configs, and optional context/message
+        """
+        if interrupt_value.get("type") == "structured_question":
+            return dict(interrupt_value)
+        if "action_requests" in interrupt_value and "review_configs" in interrupt_value:
+            return interrupt_value
+
+        interrupt_type = interrupt_value.get("type", "unknown")
+        message = interrupt_value.get("message")
+        action = interrupt_value.get("action", {})
+        context = interrupt_value.get("context", {})
+
+        normalized = {
+            "action_requests": [
+                {
+                    "name": action.get("tool", "unknown_tool"),
+                    "args": action.get("params", {}),
+                }
+            ],
+            "review_configs": [
+                {
+                    "action_name": action.get("tool", "unknown_tool"),
+                    "allowed_decisions": ["approve", "edit", "reject"],
+                }
+            ],
+            "interrupt_type": interrupt_type,
+            "context": context,
+        }
+        if message:
+            normalized["message"] = message
+        return normalized
+
     # =========================================================================
     # Error Part
     # =========================================================================
 
-    def format_error(self, error_text: str) -> str:
+    def format_error(
+        self,
+        message: str,
+        error_code: str | None = None,
+        diagnostic: str | None = None,
+        extra: dict[str, object] | None = None,
+    ) -> str:
         """
         Format an error message.
 
         Args:
-            error_text: The error message text
+            message: Display-ready error message
+            error_code: Optional machine-readable error code for frontend branching
+            diagnostic: Optional raw diagnostic text; clients must not render it
 
         Returns:
             str: SSE formatted error part
 
         Example output:
-            data: {"type":"error","errorText":"Something went wrong"}
+            data: {"type":"error","message":"Something went wrong","errorCode":"SOME_CODE"}
         """
-        return self._format_sse({"type": "error", "errorText": error_text})
+        payload: dict[str, object] = dict(extra or {})
+        payload.update({"type": "error", "message": message})
+        if error_code:
+            payload["errorCode"] = error_code
+        if diagnostic:
+            payload["diagnostic"] = diagnostic
+        return self._format_sse(payload)
 
     # =========================================================================
     # Tool Parts
     # =========================================================================
 
-    def format_tool_input_start(self, tool_call_id: str, tool_name: str) -> str:
+    def format_tool_input_start(
+        self,
+        tool_call_id: str,
+        tool_name: str,
+        *,
+        langchain_tool_call_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> str:
         """
         Format the start of tool input streaming.
 
         Args:
-            tool_call_id: The unique tool call identifier
-            tool_name: The name of the tool being called
+            tool_call_id: The unique tool call identifier. May be EITHER the
+                synthetic ``call_<run_id>`` id derived from LangGraph
+                ``run_id`` (unmatched chunk fallback when no ``index`` was
+                registered) OR the authoritative LangChain ``tool_call.id``
+                (when the provider streams ``tool_call_chunks`` we register
+                the ``index`` and reuse the lc-id as the card id so live
+                ``tool-input-delta`` events route without a downstream join).
+                Either way, the same id is preserved across
+                ``tool-input-start`` / ``-delta`` / ``-available`` /
+                ``tool-output-available`` for one call.
+            tool_name: The name of the tool being called.
+            langchain_tool_call_id: Optional authoritative LangChain
+                ``tool_call.id``. When set, surfaces as
+                ``langchainToolCallId`` so the frontend can join this card
+                to the action-log row written by ``ActionLogMiddleware``.
 
         Returns:
             str: SSE formatted tool input start part
@@ -487,13 +631,16 @@ class VercelStreamingService:
         Example output:
             data: {"type":"tool-input-start","toolCallId":"call_abc123","toolName":"getWeather"}
         """
-        return self._format_sse(
-            {
-                "type": "tool-input-start",
-                "toolCallId": tool_call_id,
-                "toolName": tool_name,
-            }
-        )
+        payload: dict[str, Any] = {
+            "type": "tool-input-start",
+            "toolCallId": tool_call_id,
+            "toolName": tool_name,
+        }
+        if langchain_tool_call_id:
+            payload["langchainToolCallId"] = langchain_tool_call_id
+        if metadata:
+            payload["metadata"] = metadata
+        return self._format_sse(payload)
 
     def format_tool_input_delta(self, tool_call_id: str, input_text_delta: str) -> str:
         """
@@ -518,7 +665,13 @@ class VercelStreamingService:
         )
 
     def format_tool_input_available(
-        self, tool_call_id: str, tool_name: str, input_data: dict[str, Any]
+        self,
+        tool_call_id: str,
+        tool_name: str,
+        input_data: dict[str, Any],
+        *,
+        langchain_tool_call_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> str:
         """
         Format the completion of tool input.
@@ -527,6 +680,8 @@ class VercelStreamingService:
             tool_call_id: The tool call identifier
             tool_name: The name of the tool
             input_data: The complete tool input parameters
+            langchain_tool_call_id: Optional authoritative LangChain
+                ``tool_call.id`` (see ``format_tool_input_start``).
 
         Returns:
             str: SSE formatted tool input available part
@@ -534,22 +689,37 @@ class VercelStreamingService:
         Example output:
             data: {"type":"tool-input-available","toolCallId":"call_abc123","toolName":"getWeather","input":{"city":"SF"}}
         """
-        return self._format_sse(
-            {
-                "type": "tool-input-available",
-                "toolCallId": tool_call_id,
-                "toolName": tool_name,
-                "input": input_data,
-            }
-        )
+        payload: dict[str, Any] = {
+            "type": "tool-input-available",
+            "toolCallId": tool_call_id,
+            "toolName": tool_name,
+            "input": input_data,
+        }
+        if langchain_tool_call_id:
+            payload["langchainToolCallId"] = langchain_tool_call_id
+        if metadata:
+            payload["metadata"] = metadata
+        return self._format_sse(payload)
 
-    def format_tool_output_available(self, tool_call_id: str, output: Any) -> str:
+    def format_tool_output_available(
+        self,
+        tool_call_id: str,
+        output: Any,
+        *,
+        langchain_tool_call_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> str:
         """
         Format tool execution output.
 
         Args:
             tool_call_id: The tool call identifier
             output: The tool execution result
+            langchain_tool_call_id: Optional authoritative LangChain
+                ``tool_call.id`` extracted from ``ToolMessage.tool_call_id``.
+                When set, the frontend can backfill any card whose
+                ``langchainToolCallId`` was not yet known at
+                ``tool-input-start`` time.
 
         Returns:
             str: SSE formatted tool output available part
@@ -557,13 +727,16 @@ class VercelStreamingService:
         Example output:
             data: {"type":"tool-output-available","toolCallId":"call_abc123","output":{"weather":"sunny"}}
         """
-        return self._format_sse(
-            {
-                "type": "tool-output-available",
-                "toolCallId": tool_call_id,
-                "output": output,
-            }
-        )
+        payload: dict[str, Any] = {
+            "type": "tool-output-available",
+            "toolCallId": tool_call_id,
+            "output": output,
+        }
+        if langchain_tool_call_id:
+            payload["langchainToolCallId"] = langchain_tool_call_id
+        if metadata:
+            payload["metadata"] = metadata
+        return self._format_sse(payload)
 
     # =========================================================================
     # Step Parts

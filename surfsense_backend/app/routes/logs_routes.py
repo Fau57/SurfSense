@@ -5,18 +5,18 @@ from sqlalchemy import and_, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
+from app.auth.context import AuthContext
 from app.db import (
     Log,
     LogLevel,
     LogStatus,
     Permission,
-    SearchSpace,
-    SearchSpaceMembership,
-    User,
+    Workspace,
+    WorkspaceMembership,
     get_async_session,
 )
 from app.schemas import LogCreate, LogRead, LogUpdate
-from app.users import current_active_user
+from app.users import get_auth_context
 from app.utils.rbac import check_permission
 
 router = APIRouter()
@@ -26,20 +26,20 @@ router = APIRouter()
 async def create_log(
     log: LogCreate,
     session: AsyncSession = Depends(get_async_session),
-    user: User = Depends(current_active_user),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """
     Create a new log entry.
     Note: This is typically called internally. Requires LOGS_READ permission (since logs are usually system-generated).
     """
     try:
-        # Check if the user has access to the search space
+        # Check if the user has access to the workspace
         await check_permission(
             session,
-            user,
-            log.search_space_id,
+            auth,
+            log.workspace_id,
             Permission.LOGS_READ.value,
-            "You don't have permission to access logs in this search space",
+            "You don't have permission to access logs in this workspace",
         )
 
         db_log = Log(**log.model_dump())
@@ -60,45 +60,46 @@ async def create_log(
 async def read_logs(
     skip: int = 0,
     limit: int = 100,
-    search_space_id: int | None = None,
+    workspace_id: int | None = None,
     level: LogLevel | None = None,
     status: LogStatus | None = None,
     source: str | None = None,
     start_date: datetime | None = None,
     end_date: datetime | None = None,
     session: AsyncSession = Depends(get_async_session),
-    user: User = Depends(current_active_user),
+    auth: AuthContext = Depends(get_auth_context),
 ):
+    user = auth.user
     """
     Get logs with optional filtering.
-    Requires LOGS_READ permission for the search space(s).
+    Requires LOGS_READ permission for the workspace(s).
     """
     try:
         # Apply filters
         filters = []
 
-        if search_space_id is not None:
-            # Check permission for specific search space
+        if workspace_id is not None:
+            # Check permission for specific workspace
             await check_permission(
                 session,
-                user,
-                search_space_id,
+                auth,
+                workspace_id,
                 Permission.LOGS_READ.value,
-                "You don't have permission to read logs in this search space",
+                "You don't have permission to read logs in this workspace",
             )
-            # Build query for specific search space
+            # Build query for specific workspace
             query = (
                 select(Log)
-                .filter(Log.search_space_id == search_space_id)
+                .filter(Log.workspace_id == workspace_id)
                 .order_by(desc(Log.created_at))
             )
         else:
-            # Build base query - logs from search spaces user has membership in
+            # Build base query - logs from workspaces user has membership in
             query = (
                 select(Log)
-                .join(SearchSpace)
-                .join(SearchSpaceMembership)
-                .filter(SearchSpaceMembership.user_id == user.id)
+                .join(Workspace)
+                .join(WorkspaceMembership)
+                .filter(WorkspaceMembership.user_id == user.id)
                 .order_by(desc(Log.created_at))
             )
 
@@ -136,11 +137,11 @@ async def read_logs(
 async def read_log(
     log_id: int,
     session: AsyncSession = Depends(get_async_session),
-    user: User = Depends(current_active_user),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """
     Get a specific log by ID.
-    Requires LOGS_READ permission for the search space.
+    Requires LOGS_READ permission for the workspace.
     """
     try:
         result = await session.execute(select(Log).filter(Log.id == log_id))
@@ -149,13 +150,13 @@ async def read_log(
         if not log:
             raise HTTPException(status_code=404, detail="Log not found")
 
-        # Check permission for the search space
+        # Check permission for the workspace
         await check_permission(
             session,
-            user,
-            log.search_space_id,
+            auth,
+            log.workspace_id,
             Permission.LOGS_READ.value,
-            "You don't have permission to read logs in this search space",
+            "You don't have permission to read logs in this workspace",
         )
 
         return log
@@ -172,7 +173,7 @@ async def update_log(
     log_id: int,
     log_update: LogUpdate,
     session: AsyncSession = Depends(get_async_session),
-    user: User = Depends(current_active_user),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """
     Update a log entry.
@@ -185,13 +186,13 @@ async def update_log(
         if not db_log:
             raise HTTPException(status_code=404, detail="Log not found")
 
-        # Check permission for the search space
+        # Check permission for the workspace
         await check_permission(
             session,
-            user,
-            db_log.search_space_id,
+            auth,
+            db_log.workspace_id,
             Permission.LOGS_READ.value,
-            "You don't have permission to access logs in this search space",
+            "You don't have permission to access logs in this workspace",
         )
 
         # Update only provided fields
@@ -215,11 +216,11 @@ async def update_log(
 async def delete_log(
     log_id: int,
     session: AsyncSession = Depends(get_async_session),
-    user: User = Depends(current_active_user),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """
     Delete a log entry.
-    Requires LOGS_DELETE permission for the search space.
+    Requires LOGS_DELETE permission for the workspace.
     """
     try:
         result = await session.execute(select(Log).filter(Log.id == log_id))
@@ -228,13 +229,13 @@ async def delete_log(
         if not db_log:
             raise HTTPException(status_code=404, detail="Log not found")
 
-        # Check permission for the search space
+        # Check permission for the workspace
         await check_permission(
             session,
-            user,
-            db_log.search_space_id,
+            auth,
+            db_log.workspace_id,
             Permission.LOGS_DELETE.value,
-            "You don't have permission to delete logs in this search space",
+            "You don't have permission to delete logs in this workspace",
         )
 
         await session.delete(db_log)
@@ -249,25 +250,25 @@ async def delete_log(
         ) from e
 
 
-@router.get("/logs/search-space/{search_space_id}/summary")
+@router.get("/logs/workspaces/{workspace_id}/summary")
 async def get_logs_summary(
-    search_space_id: int,
+    workspace_id: int,
     hours: int = 24,
     session: AsyncSession = Depends(get_async_session),
-    user: User = Depends(current_active_user),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """
-    Get a summary of logs for a search space in the last X hours.
-    Requires LOGS_READ permission for the search space.
+    Get a summary of logs for a workspace in the last X hours.
+    Requires LOGS_READ permission for the workspace.
     """
     try:
         # Check permission
         await check_permission(
             session,
-            user,
-            search_space_id,
+            auth,
+            workspace_id,
             Permission.LOGS_READ.value,
-            "You don't have permission to read logs in this search space",
+            "You don't have permission to read logs in this workspace",
         )
 
         # Calculate time window
@@ -276,9 +277,7 @@ async def get_logs_summary(
         # Get logs from the time window
         result = await session.execute(
             select(Log)
-            .filter(
-                and_(Log.search_space_id == search_space_id, Log.created_at >= since)
-            )
+            .filter(and_(Log.workspace_id == workspace_id, Log.created_at >= since))
             .order_by(desc(Log.created_at))
         )
         logs = result.scalars().all()
@@ -319,6 +318,12 @@ async def get_logs_summary(
                     if log.log_metadata
                     else "Unknown"
                 )
+                document_id = (
+                    log.log_metadata.get("document_id") if log.log_metadata else None
+                )
+                connector_id = (
+                    log.log_metadata.get("connector_id") if log.log_metadata else None
+                )
                 summary["active_tasks"].append(
                     {
                         "id": log.id,
@@ -326,6 +331,8 @@ async def get_logs_summary(
                         "message": log.message,
                         "started_at": log.created_at,
                         "source": log.source,
+                        "document_id": document_id,
+                        "connector_id": connector_id,
                     }
                 )
 

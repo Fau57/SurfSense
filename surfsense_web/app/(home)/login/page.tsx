@@ -1,22 +1,32 @@
 "use client";
 
-import { Loader2 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { Suspense, useEffect, useState } from "react";
 import { toast } from "sonner";
+import { HomeButton } from "@/components/homepage/home/home-button";
 import { Logo } from "@/components/Logo";
+import { useRuntimeConfig } from "@/components/providers/runtime-config";
+import { siteText } from "@/components/site/site-text";
 import { getAuthErrorDetails, shouldRetry } from "@/lib/auth-errors";
-import { AmbientBackground } from "./AmbientBackground";
+import { setRedirectPath } from "@/lib/auth-utils";
+import { cn } from "@/lib/utils";
 import { GoogleLoginButton } from "./GoogleLoginButton";
 import { LocalLoginForm } from "./LocalLoginForm";
+
+/**
+ * Rendered in the site design: listed in `SITE_DESIGN_ROUTES` in
+ * `components/site/site-shell.tsx`, so the palette, ruled column and
+ * navigation all come from the site shell. `SiteShell` skips the
+ * footer here (`isAuthPage`), same as it always has for this route.
+ */
 
 function LoginContent() {
 	const t = useTranslations("auth");
 	const tCommon = useTranslations("common");
-	const [authType, setAuthType] = useState<string | null>(null);
-	const [isLoading, setIsLoading] = useState(true);
+	const router = useRouter();
+	const { authType } = useRuntimeConfig();
 	const [urlError, setUrlError] = useState<{ title: string; message: string } | null>(null);
 	const searchParams = useSearchParams();
 
@@ -26,6 +36,12 @@ function LoginContent() {
 		const error = searchParams.get("error");
 		const message = searchParams.get("message");
 		const logout = searchParams.get("logout");
+		const returnUrl = searchParams.get("returnUrl");
+
+		// Save returnUrl for client-side login flows that can redirect directly after success.
+		if (returnUrl) {
+			setRedirectPath(decodeURIComponent(returnUrl));
+		}
 
 		// Show registration success message
 		if (registered === "true") {
@@ -58,7 +74,11 @@ function LoginContent() {
 			});
 
 			// Show toast with conditional retry action
-			const toastOptions: any = {
+			const toastOptions: {
+				description: string;
+				duration: number;
+				action?: { label: string; onClick: () => void };
+			} = {
 				description: errorDescription,
 				duration: 6000,
 			};
@@ -67,7 +87,7 @@ function LoginContent() {
 			if (shouldRetry(error)) {
 				toastOptions.action = {
 					label: "Retry",
-					onClick: () => window.location.reload(),
+					onClick: () => router.refresh(),
 				};
 			}
 
@@ -81,40 +101,18 @@ function LoginContent() {
 				duration: 4000,
 			});
 		}
-
-		// Get the auth type from environment variables
-		setAuthType(process.env.NEXT_PUBLIC_FASTAPI_BACKEND_AUTH_TYPE || "GOOGLE");
-		setIsLoading(false);
-	}, [searchParams]);
-
-	// Show loading state while determining auth type
-	if (isLoading) {
-		return (
-			<div className="relative w-full overflow-hidden">
-				<AmbientBackground />
-				<div className="mx-auto flex h-screen max-w-lg flex-col items-center justify-center">
-					<Logo className="rounded-md" />
-					<div className="mt-8 flex items-center space-x-2">
-						<Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
-						<span className="text-muted-foreground">{tCommon("loading")}</span>
-					</div>
-				</div>
-			</div>
-		);
-	}
+	}, [router, searchParams, t, tCommon]);
 
 	if (authType === "GOOGLE") {
 		return <GoogleLoginButton />;
 	}
 
 	return (
-		<div className="relative w-full overflow-hidden">
-			<AmbientBackground />
-			<div className="mx-auto flex h-screen max-w-lg flex-col items-center justify-center">
-				<Logo className="rounded-md" />
-				<h1 className="my-8 text-xl font-bold text-neutral-800 dark:text-neutral-100 md:text-4xl">
-					{t("sign_in")}
-				</h1>
+		<section className="py-20 md:py-28 flex min-h-screen items-center justify-center">
+			<div className="mx-auto flex w-full max-w-md flex-col items-center text-center">
+				<Logo priority className="h-14 w-14 rounded-md transition-all md:h-16 md:w-16" />
+				<h1 className={cn(siteText.h2, "mt-6 mb-2")}>{t("sign_in")}</h1>
+				<p className={siteText.body}>{t("login_subtitle")}</p>
 
 				{/* URL Error Display */}
 				<AnimatePresence>
@@ -124,7 +122,7 @@ function LoginContent() {
 							animate={{ opacity: 1, y: 0, scale: 1 }}
 							exit={{ opacity: 0, y: -10, scale: 0.95 }}
 							transition={{ duration: 0.3 }}
-							className="mb-6 w-full max-w-md rounded-lg border border-red-200 bg-red-50 p-4 text-red-900 shadow-sm dark:border-red-900/30 dark:bg-red-900/20 dark:text-red-200"
+							className="mt-6 w-full rounded-md border border-destructive/30 bg-destructive/10 p-4 text-left text-destructive shadow-sm"
 						>
 							<div className="flex items-start gap-3">
 								<svg
@@ -137,7 +135,7 @@ function LoginContent() {
 									strokeWidth="2"
 									strokeLinecap="round"
 									strokeLinejoin="round"
-									className="flex-shrink-0 mt-0.5 text-red-500 dark:text-red-400"
+									className="shrink-0 mt-0.5 text-destructive"
 								>
 									<title>Error Icon</title>
 									<circle cx="12" cy="12" r="10" />
@@ -146,12 +144,14 @@ function LoginContent() {
 								</svg>
 								<div className="flex-1 min-w-0">
 									<p className="text-sm font-semibold mb-1">{urlError.title}</p>
-									<p className="text-sm text-red-700 dark:text-red-300">{urlError.message}</p>
+									<p className="text-sm text-destructive/90">{urlError.message}</p>
 								</div>
-								<button
+								<HomeButton
 									type="button"
+									variant="ghost"
+									size="icon"
 									onClick={() => setUrlError(null)}
-									className="flex-shrink-0 text-red-500 hover:text-red-700 dark:text-red-400 dark:hover:text-red-200 transition-colors"
+									className="size-6 shrink-0 text-destructive hover:bg-transparent hover:text-destructive/80"
 									aria-label="Dismiss error"
 								>
 									<svg
@@ -169,35 +169,24 @@ function LoginContent() {
 										<line x1="18" y1="6" x2="6" y2="18" />
 										<line x1="6" y1="6" x2="18" y2="18" />
 									</svg>
-								</button>
+								</HomeButton>
 							</div>
 						</motion.div>
 					)}
 				</AnimatePresence>
 
-				<LocalLoginForm />
+				<div className="mt-8 w-full text-left">
+					<LocalLoginForm />
+				</div>
 			</div>
-		</div>
+		</section>
 	);
 }
 
-// Loading fallback for Suspense
-const LoadingFallback = () => (
-	<div className="relative w-full overflow-hidden">
-		<AmbientBackground />
-		<div className="mx-auto flex h-screen max-w-lg flex-col items-center justify-center">
-			<Logo className="rounded-md" />
-			<div className="mt-8 flex items-center space-x-2">
-				<Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
-				<span className="text-muted-foreground">Loading...</span>
-			</div>
-		</div>
-	</div>
-);
-
 export default function LoginPage() {
+	// Suspense fallback returns null - the GlobalLoadingProvider handles the loading UI
 	return (
-		<Suspense fallback={<LoadingFallback />}>
+		<Suspense fallback={null}>
 			<LoginContent />
 		</Suspense>
 	);

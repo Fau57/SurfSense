@@ -14,12 +14,13 @@ import { queryClient } from "@/lib/query-client/client";
  * Mutation atom for creating an invite
  */
 export const createInviteMutationAtom = atomWithMutation(() => ({
+	meta: { suppressGlobalErrorToast: true },
 	mutationFn: async (request: CreateInviteRequest) => {
 		return invitesApiService.createInvite(request);
 	},
 	onSuccess: (_, variables) => {
 		queryClient.invalidateQueries({
-			queryKey: cacheKeys.invites.all(variables.search_space_id.toString()),
+			queryKey: cacheKeys.invites.all(variables.workspace_id.toString()),
 		});
 		toast.success("Invite created successfully");
 	},
@@ -33,12 +34,13 @@ export const createInviteMutationAtom = atomWithMutation(() => ({
  * Mutation atom for updating an invite
  */
 export const updateInviteMutationAtom = atomWithMutation(() => ({
+	meta: { suppressGlobalErrorToast: true },
 	mutationFn: async (request: UpdateInviteRequest) => {
 		return invitesApiService.updateInvite(request);
 	},
 	onSuccess: (_, variables) => {
 		queryClient.invalidateQueries({
-			queryKey: cacheKeys.invites.all(variables.search_space_id.toString()),
+			queryKey: cacheKeys.invites.all(variables.workspace_id.toString()),
 		});
 		toast.success("Invite updated successfully");
 	},
@@ -52,12 +54,13 @@ export const updateInviteMutationAtom = atomWithMutation(() => ({
  * Mutation atom for deleting an invite
  */
 export const deleteInviteMutationAtom = atomWithMutation(() => ({
+	meta: { suppressGlobalErrorToast: true },
 	mutationFn: async (request: DeleteInviteRequest) => {
 		return invitesApiService.deleteInvite(request);
 	},
 	onSuccess: (_, variables) => {
 		queryClient.invalidateQueries({
-			queryKey: cacheKeys.invites.all(variables.search_space_id.toString()),
+			queryKey: cacheKeys.invites.all(variables.workspace_id.toString()),
 		});
 		toast.success("Invite deleted successfully");
 	},
@@ -71,11 +74,12 @@ export const deleteInviteMutationAtom = atomWithMutation(() => ({
  * Mutation atom for accepting an invite
  */
 export const acceptInviteMutationAtom = atomWithMutation(() => ({
+	meta: { suppressGlobalErrorToast: true },
 	mutationFn: async (request: AcceptInviteRequest) => {
 		return invitesApiService.acceptInvite(request);
 	},
 	onSuccess: () => {
-		queryClient.invalidateQueries({ queryKey: cacheKeys.searchSpaces.all });
+		queryClient.invalidateQueries({ queryKey: cacheKeys.workspaces.all });
 		toast.success("Invite accepted successfully");
 	},
 	onError: (error: Error) => {

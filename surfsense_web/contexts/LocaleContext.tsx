@@ -1,11 +1,31 @@
 "use client";
 
 import type React from "react";
-import { createContext, useContext, useEffect, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import enMessages from "../messages/en.json";
-import zhMessages from "../messages/zh.json";
 
-type Locale = "en" | "zh";
+type Locale = "en" | "es" | "pt" | "hi" | "zh" | "ko";
+
+/**
+ * Dynamically load locale messages on demand.
+ * English is the default and always available synchronously.
+ */
+const loadMessages = async (locale: Locale): Promise<typeof enMessages> => {
+	switch (locale) {
+		case "es":
+			return (await import("../messages/es.json")).default;
+		case "hi":
+			return (await import("../messages/hi.json")).default;
+		case "pt":
+			return (await import("../messages/pt.json")).default;
+		case "zh":
+			return (await import("../messages/zh.json")).default;
+		case "ko":
+			return (await import("../messages/ko.json")).default;
+		default:
+			return enMessages;
+	}
+};
 
 interface LocaleContextType {
 	locale: Locale;
@@ -21,31 +41,37 @@ export function LocaleProvider({ children }: { children: React.ReactNode }) {
 	// Always start with 'en' to avoid hydration mismatch
 	// Then sync with localStorage after mount
 	const [locale, setLocaleState] = useState<Locale>("en");
+	const [messages, setMessages] = useState<typeof enMessages>(enMessages);
 	const [mounted, setMounted] = useState(false);
-
-	// Get messages based on current locale
-	const messages = locale === "zh" ? zhMessages : enMessages;
 
 	// Load locale from localStorage after component mounts (client-side only)
 	useEffect(() => {
 		setMounted(true);
 		if (typeof window !== "undefined") {
 			const stored = localStorage.getItem(LOCALE_STORAGE_KEY);
-			if (stored === "zh") {
-				setLocaleState("zh");
+			if (stored && (["en", "es", "pt", "hi", "zh", "ko"] as const).includes(stored as Locale)) {
+				const storedLocale = stored as Locale;
+				setLocaleState(storedLocale);
+				// Load messages for non-English locale
+				if (storedLocale !== "en") {
+					loadMessages(storedLocale).then(setMessages);
+				}
 			}
 		}
 	}, []);
 
 	// Update locale and persist to localStorage
-	const setLocale = (newLocale: Locale) => {
+	const setLocale = useCallback(async (newLocale: Locale) => {
+		// Load messages for the new locale
+		const newMessages = await loadMessages(newLocale);
+		setMessages(newMessages);
 		setLocaleState(newLocale);
 		if (typeof window !== "undefined") {
 			localStorage.setItem(LOCALE_STORAGE_KEY, newLocale);
 			// Update HTML lang attribute
 			document.documentElement.lang = newLocale;
 		}
-	};
+	}, []);
 
 	// Set HTML lang attribute when locale changes
 	useEffect(() => {
@@ -54,11 +80,12 @@ export function LocaleProvider({ children }: { children: React.ReactNode }) {
 		}
 	}, [locale, mounted]);
 
-	return (
-		<LocaleContext.Provider value={{ locale, messages, setLocale }}>
-			{children}
-		</LocaleContext.Provider>
+	const contextValue = useMemo(
+		() => ({ locale, messages, setLocale }),
+		[locale, messages, setLocale]
 	);
+
+	return <LocaleContext.Provider value={contextValue}>{children}</LocaleContext.Provider>;
 }
 
 export function useLocaleContext() {

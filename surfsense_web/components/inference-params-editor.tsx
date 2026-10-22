@@ -1,6 +1,6 @@
 "use client";
 
-import { Plus, Trash2 } from "lucide-react";
+import { Trash2 } from "lucide-react";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -69,7 +69,7 @@ export default function InferenceParamsEditor({ params, setParams }: InferencePa
 		<div className="space-y-6 p-2 sm:p-0">
 			<div className="grid grid-cols-1 gap-4 md:grid-cols-[1fr_1fr_auto] md:gap-3 items-end">
 				<div className="flex flex-col space-y-1">
-					<Label htmlFor="param-key" className="text-sm font-medium">
+					<Label htmlFor="param-key" className="text-xs sm:text-sm font-medium">
 						Parameter Key
 					</Label>
 					<Select value={selectedKey} onValueChange={setSelectedKey}>
@@ -87,7 +87,7 @@ export default function InferenceParamsEditor({ params, setParams }: InferencePa
 				</div>
 
 				<div className="flex flex-col space-y-1">
-					<Label htmlFor="param-value" className="text-sm font-medium">
+					<Label htmlFor="param-value" className="text-xs sm:text-sm font-medium">
 						Value
 					</Label>
 					<Input
@@ -100,11 +100,11 @@ export default function InferenceParamsEditor({ params, setParams }: InferencePa
 				</div>
 
 				<Button
-					className="w-full md:w-auto h-10 mt-0"
+					className="w-full md:w-auto h-9 sm:h-10 mt-0 text-xs sm:text-sm"
 					onClick={handleAdd}
 					disabled={!selectedKey || value === ""}
 				>
-					<Plus className="w-4 h-4 mr-2" /> Add Parameter
+					Add Parameter
 				</Button>
 			</div>
 
@@ -128,7 +128,10 @@ export default function InferenceParamsEditor({ params, setParams }: InferencePa
 						</thead>
 						<tbody className="divide-y divide-gray-200 bg-black dark:bg-black">
 							{Object.entries(params).map(([key, val]) => (
-								<tr key={key} className="hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors">
+								<tr
+									key={key}
+									className="hover:bg-accent hover:text-accent-foreground transition-colors"
+								>
 									<td className="px-4 py-3 font-medium text-gray-900 dark:text-white">{key}</td>
 									<td className="px-4 py-3 text-gray-700 dark:text-gray-300">{val.toString()}</td>
 									<td className="px-4 py-3">

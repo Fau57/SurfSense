@@ -1,7 +1,9 @@
 "use client";
 
-import { BadgeCheck, LogOut, Settings } from "lucide-react";
+import { BadgeCheck, LogOut } from "lucide-react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { useState } from "react";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import {
@@ -13,6 +15,9 @@ import {
 	DropdownMenuSeparator,
 	DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Spinner } from "@/components/ui/spinner";
+import { getLoginPath, logout } from "@/lib/auth-utils";
+import { resetUser, trackLogout } from "@/lib/posthog/events";
 
 export function UserDropdown({
 	user,
@@ -24,20 +29,24 @@ export function UserDropdown({
 	};
 }) {
 	const router = useRouter();
+	const [isLoggingOut, setIsLoggingOut] = useState(false);
 
-	const handleLogout = () => {
+	const handleLogout = async () => {
+		if (isLoggingOut) return;
+		setIsLoggingOut(true);
 		try {
-			if (typeof window !== "undefined") {
-				localStorage.removeItem("surfsense_bearer_token");
-				router.push("/");
-			}
+			trackLogout();
+			resetUser();
+
+			await logout();
+
+			router.push(getLoginPath());
+			router.refresh();
 		} catch (error) {
 			console.error("Error during logout:", error);
-			// Optionally, provide user feedback
-			if (typeof window !== "undefined") {
-				alert("Logout failed. Please try again.");
-				router.push("/");
-			}
+			await logout();
+			router.push(getLoginPath());
+			router.refresh();
 		}
 	};
 
@@ -51,24 +60,36 @@ export function UserDropdown({
 					</Avatar>
 				</Button>
 			</DropdownMenuTrigger>
-			<DropdownMenuContent className="w-56" align="end" forceMount>
-				<DropdownMenuLabel className="font-normal">
+			<DropdownMenuContent className="w-44 md:w-56" align="end">
+				<DropdownMenuLabel className="font-normal p-2 md:p-3">
 					<div className="flex flex-col space-y-1">
-						<p className="text-sm font-medium leading-none">{user.name}</p>
-						<p className="text-xs leading-none text-muted-foreground">{user.email}</p>
+						<p className="text-xs md:text-sm font-medium leading-none">{user.name}</p>
+						<p className="text-[10px] md:text-xs leading-none text-muted-foreground">
+							{user.email}
+						</p>
 					</div>
 				</DropdownMenuLabel>
 				<DropdownMenuSeparator />
 				<DropdownMenuGroup>
-					<DropdownMenuItem onClick={() => router.push(`/dashboard/api-key`)}>
-						<BadgeCheck className="mr-2 h-4 w-4" />
-						API Key
+					<DropdownMenuItem asChild className="text-xs md:text-sm">
+						<Link href="/dashboard/api-key">
+							<BadgeCheck className="mr-2 h-3.5 w-3.5 md:h-4 md:w-4" />
+							API Key
+						</Link>
 					</DropdownMenuItem>
 				</DropdownMenuGroup>
 				<DropdownMenuSeparator />
-				<DropdownMenuItem onClick={handleLogout}>
-					<LogOut className="mr-2 h-4 w-4" />
-					Log out
+				<DropdownMenuItem
+					onClick={handleLogout}
+					className="text-xs md:text-sm"
+					disabled={isLoggingOut}
+				>
+					{isLoggingOut ? (
+						<Spinner size="sm" className="mr-2" />
+					) : (
+						<LogOut className="mr-2 h-3.5 w-3.5 md:h-4 md:w-4" />
+					)}
+					{isLoggingOut ? "Logging out..." : "Log out"}
 				</DropdownMenuItem>
 			</DropdownMenuContent>
 		</DropdownMenu>

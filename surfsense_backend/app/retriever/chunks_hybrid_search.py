@@ -1,4 +1,74 @@
+import asyncio
+import contextlib
+import functools
+import time
 from datetime import datetime
+
+from app.observability.domains import kb
+from app.utils.perf import get_perf_logger
+
+_MAX_FETCH_CHUNKS_PER_DOC = 20
+
+
+def _cap_chunks_per_document(
+    chunks: list[dict], matched_ids: set[int], *, limit: int
+) -> list[dict]:
+    """Keep at most ``limit`` chunks for one document, matched ones first.
+
+    ``chunks`` arrives in reading order and the returned list preserves it;
+    only the selection is priority-ordered. Matched chunks are the citable
+    ones, so they are kept ahead of surrounding context.
+    """
+    if len(chunks) <= limit:
+        return chunks
+
+    keep: set[int] = set()
+    for chunk in chunks:
+        if len(keep) >= limit:
+            break
+        if chunk["chunk_id"] in matched_ids:
+            keep.add(chunk["chunk_id"])
+    for chunk in chunks:
+        if len(keep) >= limit:
+            break
+        keep.add(chunk["chunk_id"])
+    return [chunk for chunk in chunks if chunk["chunk_id"] in keep]
+
+
+def _instrument_search(mode: str):
+    def _decorator(func):
+        @functools.wraps(func)
+        async def _wrapper(
+            self, query_text: str, top_k: int, workspace_id: int, *args, **kwargs
+        ):
+            t0 = time.perf_counter()
+            with kb.kb_search_span(
+                workspace_id=workspace_id,
+                query_chars=len(query_text),
+                extra={"search.surface": "chunks", "search.mode": mode},
+            ) as sp:
+                try:
+                    result = await func(
+                        self, query_text, top_k, workspace_id, *args, **kwargs
+                    )
+                except Exception:
+                    kb.record_kb_search_duration(
+                        (time.perf_counter() - t0) * 1000,
+                        workspace_id=workspace_id,
+                        surface="chunks",
+                    )
+                    raise
+                sp.set_attribute("result.count", len(result))
+                kb.record_kb_search_duration(
+                    (time.perf_counter() - t0) * 1000,
+                    workspace_id=workspace_id,
+                    surface="chunks",
+                )
+                return result
+
+        return _wrapper
+
+    return _decorator
 
 
 class ChucksHybridSearchRetriever:
@@ -11,11 +81,12 @@ class ChucksHybridSearchRetriever:
         """
         self.db_session = db_session
 
+    @_instrument_search("vector")
     async def vector_search(
         self,
         query_text: str,
         top_k: int,
-        search_space_id: int,
+        workspace_id: int,
         start_date: datetime | None = None,
         end_date: datetime | None = None,
     ) -> list:
@@ -25,7 +96,7 @@ class ChucksHybridSearchRetriever:
         Args:
             query_text: The search query text
             top_k: Number of results to return
-            search_space_id: The search space ID to search within
+            workspace_id: The workspace ID to search within
             start_date: Optional start date for filtering documents by updated_at
             end_date: Optional end date for filtering documents by updated_at
 
@@ -38,16 +109,24 @@ class ChucksHybridSearchRetriever:
         from app.config import config
         from app.db import Chunk, Document
 
+        perf = get_perf_logger()
+        t0 = time.perf_counter()
+
         # Get embedding for the query
         embedding_model = config.embedding_model_instance
-        query_embedding = embedding_model.embed(query_text)
+        t_embed = time.perf_counter()
+        query_embedding = await asyncio.to_thread(embedding_model.embed, query_text)
+        perf.debug(
+            "[chunk_search] vector_search embedding in %.3fs",
+            time.perf_counter() - t_embed,
+        )
 
-        # Build the query filtered by search space
+        # Build the query filtered by workspace
         query = (
             select(Chunk)
-            .options(joinedload(Chunk.document).joinedload(Document.search_space))
+            .options(joinedload(Chunk.document).joinedload(Document.workspace))
             .join(Document, Chunk.document_id == Document.id)
-            .where(Document.search_space_id == search_space_id)
+            .where(Document.workspace_id == workspace_id)
         )
 
         # Add time-based filtering if provided
@@ -60,16 +139,25 @@ class ChucksHybridSearchRetriever:
         query = query.order_by(Chunk.embedding.op("<=>")(query_embedding)).limit(top_k)
 
         # Execute the query
+        t_db = time.perf_counter()
         result = await self.db_session.execute(query)
         chunks = result.scalars().all()
+        perf.info(
+            "[chunk_search] vector_search DB query in %.3fs results=%d (total %.3fs) space=%d",
+            time.perf_counter() - t_db,
+            len(chunks),
+            time.perf_counter() - t0,
+            workspace_id,
+        )
 
         return chunks
 
+    @_instrument_search("full_text")
     async def full_text_search(
         self,
         query_text: str,
         top_k: int,
-        search_space_id: int,
+        workspace_id: int,
         start_date: datetime | None = None,
         end_date: datetime | None = None,
     ) -> list:
@@ -79,7 +167,7 @@ class ChucksHybridSearchRetriever:
         Args:
             query_text: The search query text
             top_k: Number of results to return
-            search_space_id: The search space ID to search within
+            workspace_id: The workspace ID to search within
             start_date: Optional start date for filtering documents by updated_at
             end_date: Optional end date for filtering documents by updated_at
 
@@ -91,16 +179,19 @@ class ChucksHybridSearchRetriever:
 
         from app.db import Chunk, Document
 
+        perf = get_perf_logger()
+        t0 = time.perf_counter()
+
         # Create tsvector and tsquery for PostgreSQL full-text search
         tsvector = func.to_tsvector("english", Chunk.content)
         tsquery = func.plainto_tsquery("english", query_text)
 
-        # Build the query filtered by search space
+        # Build the query filtered by workspace
         query = (
             select(Chunk)
-            .options(joinedload(Chunk.document).joinedload(Document.search_space))
+            .options(joinedload(Chunk.document).joinedload(Document.workspace))
             .join(Document, Chunk.document_id == Document.id)
-            .where(Document.search_space_id == search_space_id)
+            .where(Document.workspace_id == workspace_id)
             .where(
                 tsvector.op("@@")(tsquery)
             )  # Only include results that match the query
@@ -118,17 +209,25 @@ class ChucksHybridSearchRetriever:
         # Execute the query
         result = await self.db_session.execute(query)
         chunks = result.scalars().all()
+        perf.info(
+            "[chunk_search] full_text_search in %.3fs results=%d space=%d",
+            time.perf_counter() - t0,
+            len(chunks),
+            workspace_id,
+        )
 
         return chunks
 
+    @_instrument_search("hybrid")
     async def hybrid_search(
         self,
         query_text: str,
         top_k: int,
-        search_space_id: int,
-        document_type: str | None = None,
+        workspace_id: int,
+        document_type: str | list[str] | None = None,
         start_date: datetime | None = None,
         end_date: datetime | None = None,
+        query_embedding: list | None = None,
     ) -> list:
         """
         Hybrid search that returns **documents** (not individual chunks).
@@ -139,10 +238,11 @@ class ChucksHybridSearchRetriever:
         Args:
             query_text: The search query text
             top_k: Number of documents to return
-            search_space_id: The search space ID to search within
+            workspace_id: The workspace ID to search within
             document_type: Optional document type to filter results (e.g., "FILE", "CRAWLED_URL")
             start_date: Optional start date for filtering documents by updated_at
             end_date: Optional end date for filtering documents by updated_at
+            query_embedding: Pre-computed embedding vector. If None, will be computed here.
 
         Returns:
             List of dictionaries containing document data and relevance scores. Each dict contains:
@@ -151,15 +251,23 @@ class ChucksHybridSearchRetriever:
               - chunks: list[{chunk_id, content}] for citation-aware prompting
               - document: {id, title, document_type, metadata}
         """
-        from sqlalchemy import func, select, text
+        from sqlalchemy import func, or_, select, text
         from sqlalchemy.orm import joinedload
 
         from app.config import config
         from app.db import Chunk, Document, DocumentType
 
-        # Get embedding for the query
-        embedding_model = config.embedding_model_instance
-        query_embedding = embedding_model.embed(query_text)
+        perf = get_perf_logger()
+        t0 = time.perf_counter()
+
+        if query_embedding is None:
+            embedding_model = config.embedding_model_instance
+            t_embed = time.perf_counter()
+            query_embedding = await asyncio.to_thread(embedding_model.embed, query_text)
+            perf.debug(
+                "[chunk_search] hybrid_search embedding in %.3fs",
+                time.perf_counter() - t_embed,
+            )
 
         # RRF constants
         k = 60
@@ -169,21 +277,31 @@ class ChucksHybridSearchRetriever:
         tsvector = func.to_tsvector("english", Chunk.content)
         tsquery = func.plainto_tsquery("english", query_text)
 
-        # Base conditions for chunk filtering - search space is required
-        base_conditions = [Document.search_space_id == search_space_id]
+        # Base conditions for chunk filtering - workspace is required.
+        # Exclude documents in "deleting" state (background deletion in progress).
+        base_conditions = [
+            Document.workspace_id == workspace_id,
+            func.coalesce(Document.status["state"].astext, "ready") != "deleting",
+        ]
 
-        # Add document type filter if provided
+        # Add document type filter if provided (single string or list of strings)
         if document_type is not None:
-            # Convert string to enum value if needed
-            if isinstance(document_type, str):
-                try:
-                    doc_type_enum = DocumentType[document_type]
-                    base_conditions.append(Document.document_type == doc_type_enum)
-                except KeyError:
-                    # If the document type doesn't exist in the enum, return empty results
-                    return []
+            type_list = (
+                document_type if isinstance(document_type, list) else [document_type]
+            )
+            doc_type_enums = []
+            for dt in type_list:
+                if isinstance(dt, str):
+                    with contextlib.suppress(KeyError):
+                        doc_type_enums.append(DocumentType[dt])
+                else:
+                    doc_type_enums.append(dt)
+            if not doc_type_enums:
+                return []
+            if len(doc_type_enums) == 1:
+                base_conditions.append(Document.document_type == doc_type_enums[0])
             else:
-                base_conditions.append(Document.document_type == document_type)
+                base_conditions.append(Document.document_type.in_(doc_type_enums))
 
         # Add time-based filtering if provided
         if start_date is not None:
@@ -191,7 +309,7 @@ class ChucksHybridSearchRetriever:
         if end_date is not None:
             base_conditions.append(Document.updated_at <= end_date)
 
-        # CTE for semantic search filtered by search space
+        # CTE for semantic search filtered by workspace
         semantic_search_cte = (
             select(
                 Chunk.id,
@@ -209,7 +327,7 @@ class ChucksHybridSearchRetriever:
             .cte("semantic_search")
         )
 
-        # CTE for keyword search filtered by search space
+        # CTE for keyword search filtered by workspace
         keyword_search_cte = (
             select(
                 Chunk.id,
@@ -251,12 +369,23 @@ class ChucksHybridSearchRetriever:
             )
             .options(joinedload(Chunk.document))
             .order_by(text("score DESC"))
-            .limit(top_k)
+            # Chunk rows, not documents: a chunk-dense document would otherwise
+            # fill a top_k-sized fusion window on its own and crowd every other
+            # document out. The document cap is applied after grouping, below.
+            .limit(n_results)
         )
 
-        # Execute the query
+        # Execute the RRF query
+        t_rrf = time.perf_counter()
         result = await self.db_session.execute(final_query)
         chunks_with_scores = result.all()
+        perf.info(
+            "[chunk_search] hybrid_search RRF query in %.3fs results=%d space=%d type=%s",
+            time.perf_counter() - t_rrf,
+            len(chunks_with_scores),
+            workspace_id,
+            document_type,
+        )
 
         # If no results were found, return an empty list
         if not chunks_with_scores:
@@ -300,58 +429,113 @@ class ChucksHybridSearchRetriever:
         if not doc_ids:
             return []
 
-        # Fetch ALL chunks for selected documents in a single query so the final prompt can cite
-        # any chunk from those documents.
-        chunk_query = (
-            select(Chunk)
-            .options(joinedload(Chunk.document))
-            .join(Document, Chunk.document_id == Document.id)
-            .where(Document.id.in_(doc_ids))
-            .where(*base_conditions)
-            .order_by(Chunk.document_id, Chunk.id)
-        )
-        chunks_result = await self.db_session.execute(chunk_query)
-        all_chunks = chunks_result.scalars().all()
+        # Collect document metadata from the small RRF result set (already
+        # loaded via joinedload) so the bulk chunk fetch can skip the expensive
+        # Document JOIN entirely.
+        matched_chunk_ids: set[int] = {
+            item["chunk_id"] for item in serialized_chunk_results
+        }
+        doc_meta_cache: dict[int, dict] = {}
+        for item in serialized_chunk_results:
+            did = item["document"]["id"]
+            if did not in doc_meta_cache:
+                doc_meta_cache[did] = item["document"]
 
-        # Assemble final doc-grouped results in the same order as doc_ids
+        # SQL-level per-document chunk limit using ROW_NUMBER().
+        # Avoids loading hundreds of chunks per large document only to
+        # discard them in Python.
+        numbered = (
+            select(
+                Chunk.id.label("chunk_id"),
+                func.row_number()
+                .over(
+                    partition_by=Chunk.document_id,
+                    order_by=(Chunk.position, Chunk.id),
+                )
+                .label("rn"),
+            )
+            .where(Chunk.document_id.in_(doc_ids))
+            .subquery("numbered")
+        )
+
+        matched_list = list(matched_chunk_ids)
+        if matched_list:
+            chunk_filter = or_(
+                numbered.c.rn <= _MAX_FETCH_CHUNKS_PER_DOC,
+                Chunk.id.in_(matched_list),
+            )
+        else:
+            chunk_filter = numbered.c.rn <= _MAX_FETCH_CHUNKS_PER_DOC
+
+        # Select only the columns we need (skip Chunk.embedding ~12KB/row).
+        chunk_query = (
+            select(Chunk.id, Chunk.content, Chunk.document_id)
+            .join(numbered, Chunk.id == numbered.c.chunk_id)
+            .where(chunk_filter)
+            .order_by(Chunk.document_id, Chunk.position, Chunk.id)
+        )
+
+        t_fetch = time.perf_counter()
+        chunks_result = await self.db_session.execute(chunk_query)
+        fetched_chunks = chunks_result.all()
+        perf.debug(
+            "[chunk_search] chunk fetch in %.3fs rows=%d",
+            time.perf_counter() - t_fetch,
+            len(fetched_chunks),
+        )
+
+        # Assemble final doc-grouped results in the same order as doc_ids,
+        # using pre-cached doc metadata instead of joinedload.
         doc_map: dict[int, dict] = {
             doc_id: {
                 "document_id": doc_id,
                 "content": "",
                 "score": float(doc_scores.get(doc_id, 0.0)),
                 "chunks": [],
-                "document": {},
-                "source": None,
+                "matched_chunk_ids": [],
+                "document": doc_meta_cache.get(doc_id, {}),
+                "source": (doc_meta_cache.get(doc_id) or {}).get("document_type"),
             }
             for doc_id in doc_ids
         }
 
-        for chunk in all_chunks:
-            doc = chunk.document
-            doc_id = doc.id
+        for row in fetched_chunks:
+            doc_id = row.document_id
             if doc_id not in doc_map:
                 continue
             doc_entry = doc_map[doc_id]
-            doc_entry["document"] = {
-                "id": doc.id,
-                "title": doc.title,
-                "document_type": doc.document_type.value
-                if getattr(doc, "document_type", None)
-                else None,
-                "metadata": doc.document_metadata or {},
-            }
-            doc_entry["source"] = (
-                doc.document_type.value if getattr(doc, "document_type", None) else None
-            )
-            doc_entry["chunks"].append({"chunk_id": chunk.id, "content": chunk.content})
+            doc_entry["chunks"].append({"chunk_id": row.id, "content": row.content})
+            if row.id in matched_chunk_ids:
+                doc_entry["matched_chunk_ids"].append(row.id)
 
         # Fill concatenated content (useful for reranking)
         final_docs: list[dict] = []
         for doc_id in doc_ids:
             entry = doc_map[doc_id]
+            # The fusion window is sized in chunks, so a chunk-dense
+            # document can match far more passages than one prompt should
+            # carry. Bound what each document contributes, keeping the
+            # citable chunks first.
+            entry["chunks"] = _cap_chunks_per_document(
+                entry["chunks"],
+                matched_chunk_ids,
+                limit=_MAX_FETCH_CHUNKS_PER_DOC,
+            )
+            entry["matched_chunk_ids"] = [
+                chunk["chunk_id"]
+                for chunk in entry["chunks"]
+                if chunk["chunk_id"] in matched_chunk_ids
+            ]
             entry["content"] = "\n\n".join(
                 c["content"] for c in entry.get("chunks", []) if c.get("content")
             )
             final_docs.append(entry)
 
+        perf.info(
+            "[chunk_search] hybrid_search TOTAL in %.3fs docs=%d space=%d type=%s",
+            time.perf_counter() - t0,
+            len(final_docs),
+            workspace_id,
+            document_type,
+        )
         return final_docs

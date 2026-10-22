@@ -1,13 +1,21 @@
 import { atomWithQuery } from "jotai-tanstack-query";
 import { userApiService } from "@/lib/apis/user-api.service";
-import { cacheKeys } from "@/lib/query-client/cache-keys";
+import { isAuthenticated } from "@/lib/auth-utils";
+
+export const USER_QUERY_KEY = ["user", "me"] as const;
+const userQueryFn = () => userApiService.getMe();
 
 export const currentUserAtom = atomWithQuery(() => {
 	return {
-		queryKey: cacheKeys.user.current(),
-		staleTime: 5 * 60 * 1000, // 5 minutes
-		queryFn: async () => {
-			return userApiService.getMe();
-		},
+		queryKey: USER_QUERY_KEY,
+		// Live-changing numeric fields (pages_*, premium_credit_micros_*)
+		// are now pushed via Zero (queries.user.me()), so /users/me only
+		// needs to fire once per session for the static profile fields.
+		staleTime: Infinity,
+		enabled: isAuthenticated(),
+		// No `retry: false` here: paired with `staleTime: Infinity`, one dropped
+		// connection would leave the profile blank for the whole session. The
+		// shared predicate already refuses to retry a 401.
+		queryFn: userQueryFn,
 	};
 });

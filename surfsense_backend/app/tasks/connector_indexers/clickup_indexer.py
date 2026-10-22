@@ -1,41 +1,55 @@
 """
 ClickUp connector indexer.
+
+Implements 2-phase document status updates for real-time UI feedback:
+- Phase 1: Create all documents with 'pending' status (visible in UI immediately)
+- Phase 2: Process each document: pending → processing → ready/failed
 """
 
+import contextlib
+import time
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import config
-from app.connectors.clickup_connector import ClickUpConnector
-from app.db import Document, DocumentType, SearchSourceConnectorType
-from app.services.llm_service import get_user_long_context_llm
+from app.connectors.clickup_history import ClickUpHistoryConnector
+from app.db import Document, DocumentStatus, DocumentType, SearchSourceConnectorType
 from app.services.task_logging_service import TaskLoggingService
 from app.utils.document_converters import (
     create_document_chunks,
+    embed_text,
     generate_content_hash,
-    generate_document_summary,
     generate_unique_identifier_hash,
 )
 
 from .base import (
     check_document_by_unique_identifier,
+    check_duplicate_document_by_hash,
     get_connector_by_id,
     get_current_timestamp,
     logger,
+    safe_set_chunks,
     update_connector_last_indexed,
 )
+
+# Type hint for heartbeat callback
+HeartbeatCallbackType = Callable[[int], Awaitable[None]]
+
+# Heartbeat interval in seconds
+HEARTBEAT_INTERVAL_SECONDS = 30
 
 
 async def index_clickup_tasks(
     session: AsyncSession,
     connector_id: int,
-    search_space_id: int,
+    workspace_id: int,
     user_id: str,
     start_date: str | None = None,
     end_date: str | None = None,
     update_last_indexed: bool = True,
+    on_heartbeat_callback: HeartbeatCallbackType | None = None,
 ) -> tuple[int, str | None]:
     """
     Index tasks from ClickUp workspace.
@@ -43,16 +57,17 @@ async def index_clickup_tasks(
     Args:
         session: Database session
         connector_id: ID of the ClickUp connector
-        search_space_id: ID of the search space
+        workspace_id: ID of the workspace
         user_id: ID of the user
         start_date: Start date for filtering tasks (YYYY-MM-DD format)
         end_date: End date for filtering tasks (YYYY-MM-DD format)
         update_last_indexed: Whether to update the last_indexed_at timestamp
+        on_heartbeat_callback: Optional callback to update notification during long-running indexing.
 
     Returns:
         Tuple of (number of indexed tasks, error message if any)
     """
-    task_logger = TaskLoggingService(session, search_space_id)
+    task_logger = TaskLoggingService(session, workspace_id)
 
     # Log task start
     log_entry = await task_logger.log_task_start(
@@ -82,26 +97,30 @@ async def index_clickup_tasks(
             )
             return 0, error_msg
 
-        # Extract ClickUp configuration
-        clickup_api_token = connector.config.get("CLICKUP_API_TOKEN")
+        # Check if using OAuth (has access_token in config) or legacy (has CLICKUP_API_TOKEN)
+        has_oauth = connector.config.get("access_token") is not None
+        has_legacy = connector.config.get("CLICKUP_API_TOKEN") is not None
 
-        if not clickup_api_token:
-            error_msg = "ClickUp API token not found in connector configuration"
+        if not has_oauth and not has_legacy:
+            error_msg = "ClickUp credentials not found in connector configuration (neither OAuth nor API token)"
             await task_logger.log_task_failure(
                 log_entry,
-                f"ClickUp API token not found in connector config for connector {connector_id}",
-                "Missing ClickUp token",
-                {"error_type": "MissingToken"},
+                f"ClickUp credentials not found in connector config for connector {connector_id}",
+                "Missing ClickUp credentials",
+                {"error_type": "MissingCredentials"},
             )
             return 0, error_msg
 
         await task_logger.log_task_progress(
             log_entry,
-            f"Initializing ClickUp client for connector {connector_id}",
+            f"Initializing ClickUp client for connector {connector_id} ({'OAuth' if has_oauth else 'API Token'})",
             {"stage": "client_initialization"},
         )
 
-        clickup_client = ClickUpConnector(api_token=clickup_api_token)
+        # Use history connector which supports both OAuth and legacy API tokens
+        clickup_client = ClickUpHistoryConnector(
+            session=session, connector_id=connector_id
+        )
 
         # Get authorized workspaces
         await task_logger.log_task_progress(
@@ -110,7 +129,7 @@ async def index_clickup_tasks(
             {"stage": "workspace_fetching"},
         )
 
-        workspaces_response = clickup_client.get_authorized_workspaces()
+        workspaces_response = await clickup_client.get_authorized_workspaces()
         workspaces = workspaces_response.get("teams", [])
 
         if not workspaces:
@@ -125,6 +144,17 @@ async def index_clickup_tasks(
 
         documents_indexed = 0
         documents_skipped = 0
+        documents_failed = 0
+
+        # Heartbeat tracking - update notification periodically to prevent appearing stuck
+        last_heartbeat_time = time.time()
+
+        # =======================================================================
+        # PHASE 1: Collect all tasks and create pending documents
+        # This makes ALL documents visible in the UI immediately with pending status
+        # =======================================================================
+        tasks_to_process = []  # List of dicts with document and task data
+        new_documents_created = False
 
         # Iterate workspaces and fetch tasks
         for workspace in workspaces:
@@ -141,7 +171,7 @@ async def index_clickup_tasks(
 
             # Fetch tasks for date range if provided
             if start_date and end_date:
-                tasks, error = clickup_client.get_tasks_in_date_range(
+                tasks, error = await clickup_client.get_tasks_in_date_range(
                     workspace_id=workspace_id,
                     start_date=start_date,
                     end_date=end_date,
@@ -153,7 +183,7 @@ async def index_clickup_tasks(
                     )
                     continue
             else:
-                tasks = clickup_client.get_workspace_tasks(
+                tasks = await clickup_client.get_workspace_tasks(
                     workspace_id=workspace_id, include_closed=True
                 )
 
@@ -213,11 +243,11 @@ async def index_clickup_tasks(
 
                     # Generate unique identifier hash for this ClickUp task
                     unique_identifier_hash = generate_unique_identifier_hash(
-                        DocumentType.CLICKUP_CONNECTOR, task_id, search_space_id
+                        DocumentType.CLICKUP_CONNECTOR, task_id, workspace_id
                     )
 
                     # Generate content hash
-                    content_hash = generate_content_hash(task_content, search_space_id)
+                    content_hash = generate_content_hash(task_content, workspace_id)
 
                     # Check if document with this unique identifier already exists
                     existing_document = await check_document_by_unique_identifier(
@@ -227,112 +257,61 @@ async def index_clickup_tasks(
                     if existing_document:
                         # Document exists - check if content has changed
                         if existing_document.content_hash == content_hash:
+                            # Ensure status is ready (might have been stuck in processing/pending)
+                            if not DocumentStatus.is_state(
+                                existing_document.status, DocumentStatus.READY
+                            ):
+                                existing_document.status = DocumentStatus.ready()
                             logger.info(
                                 f"Document for ClickUp task {task_name} unchanged. Skipping."
                             )
                             documents_skipped += 1
                             continue
                         else:
-                            # Content has changed - update the existing document
+                            # Queue existing document for update (will be set to processing in Phase 2)
                             logger.info(
-                                f"Content changed for ClickUp task {task_name}. Updating document."
+                                f"Content changed for ClickUp task {task_name}. Queuing for update."
                             )
-
-                            # Generate summary with metadata
-                            user_llm = await get_user_long_context_llm(
-                                session, user_id, search_space_id
-                            )
-
-                            if user_llm:
-                                document_metadata = {
+                            tasks_to_process.append(
+                                {
+                                    "document": existing_document,
+                                    "is_new": False,
+                                    "task_content": task_content,
+                                    "content_hash": content_hash,
                                     "task_id": task_id,
                                     "task_name": task_name,
                                     "task_status": task_status,
                                     "task_priority": task_priority,
-                                    "task_list": task_list_name,
-                                    "task_space": task_space_name,
-                                    "assignees": len(task_assignees),
-                                    "document_type": "ClickUp Task",
-                                    "connector_type": "ClickUp",
+                                    "task_list_name": task_list_name,
+                                    "task_space_name": task_space_name,
+                                    "task_assignees": task_assignees,
+                                    "task_due_date": task_due_date,
+                                    "task_created": task_created,
+                                    "task_updated": task_updated,
                                 }
-                                (
-                                    summary_content,
-                                    summary_embedding,
-                                ) = await generate_document_summary(
-                                    task_content, user_llm, document_metadata
-                                )
-                            else:
-                                summary_content = task_content
-                                summary_embedding = (
-                                    config.embedding_model_instance.embed(task_content)
-                                )
-
-                            # Process chunks
-                            chunks = await create_document_chunks(task_content)
-
-                            # Update existing document
-                            existing_document.title = f"Task - {task_name}"
-                            existing_document.content = summary_content
-                            existing_document.content_hash = content_hash
-                            existing_document.embedding = summary_embedding
-                            existing_document.document_metadata = {
-                                "task_id": task_id,
-                                "task_name": task_name,
-                                "task_status": task_status,
-                                "task_priority": task_priority,
-                                "task_assignees": task_assignees,
-                                "task_due_date": task_due_date,
-                                "task_created": task_created,
-                                "task_updated": task_updated,
-                                "indexed_at": datetime.now().strftime(
-                                    "%Y-%m-%d %H:%M:%S"
-                                ),
-                            }
-                            existing_document.chunks = chunks
-                            existing_document.updated_at = get_current_timestamp()
-
-                            documents_indexed += 1
-                            logger.info(
-                                f"Successfully updated ClickUp task {task_name}"
                             )
                             continue
 
-                    # Document doesn't exist - create new one
-                    # Generate summary with metadata
-                    user_llm = await get_user_long_context_llm(
-                        session, user_id, search_space_id
-                    )
-
-                    if user_llm:
-                        document_metadata = {
-                            "task_id": task_id,
-                            "task_name": task_name,
-                            "task_status": task_status,
-                            "task_priority": task_priority,
-                            "task_list": task_list_name,
-                            "task_space": task_space_name,
-                            "assignees": len(task_assignees),
-                            "document_type": "ClickUp Task",
-                            "connector_type": "ClickUp",
-                        }
-                        (
-                            summary_content,
-                            summary_embedding,
-                        ) = await generate_document_summary(
-                            task_content, user_llm, document_metadata
-                        )
-                    else:
-                        # Fallback to simple summary if no LLM configured
-                        summary_content = task_content
-                        summary_embedding = config.embedding_model_instance.embed(
-                            task_content
+                    # Document doesn't exist by unique_identifier_hash
+                    # Check if a document with the same content_hash exists (from another connector)
+                    with session.no_autoflush:
+                        duplicate_by_content = await check_duplicate_document_by_hash(
+                            session, content_hash
                         )
 
-                    chunks = await create_document_chunks(task_content)
+                    if duplicate_by_content:
+                        logger.info(
+                            f"ClickUp task {task_name} already indexed by another connector "
+                            f"(existing document ID: {duplicate_by_content.id}, "
+                            f"type: {duplicate_by_content.document_type}). Skipping."
+                        )
+                        documents_skipped += 1
+                        continue
 
+                    # Create new document with PENDING status (visible in UI immediately)
                     document = Document(
-                        search_space_id=search_space_id,
-                        title=f"Task - {task_name}",
+                        workspace_id=workspace_id,
+                        title=task_name,
                         document_type=DocumentType.CLICKUP_CONNECTOR,
                         document_metadata={
                             "task_id": task_id,
@@ -343,42 +322,161 @@ async def index_clickup_tasks(
                             "task_due_date": task_due_date,
                             "task_created": task_created,
                             "task_updated": task_updated,
-                            "indexed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            "connector_id": connector_id,
                         },
-                        content=summary_content,
-                        content_hash=content_hash,
+                        content="Pending...",  # Placeholder until processed
+                        content_hash=unique_identifier_hash,  # Temporary unique value - updated when ready
                         unique_identifier_hash=unique_identifier_hash,
-                        embedding=summary_embedding,
-                        chunks=chunks,
+                        embedding=None,
+                        chunks=[],  # Empty at creation - safe for async
+                        status=DocumentStatus.pending(),  # Pending until processing starts
                         updated_at=get_current_timestamp(),
+                        created_by_id=user_id,
+                        connector_id=connector_id,
                     )
-
                     session.add(document)
-                    documents_indexed += 1
-                    logger.info(f"Successfully indexed new task {task_name}")
+                    new_documents_created = True
 
-                    # Batch commit every 10 documents
-                    if documents_indexed % 10 == 0:
-                        logger.info(
-                            f"Committing batch: {documents_indexed} ClickUp tasks processed so far"
-                        )
-                        await session.commit()
+                    tasks_to_process.append(
+                        {
+                            "document": document,
+                            "is_new": True,
+                            "task_content": task_content,
+                            "content_hash": content_hash,
+                            "task_id": task_id,
+                            "task_name": task_name,
+                            "task_status": task_status,
+                            "task_priority": task_priority,
+                            "task_list_name": task_list_name,
+                            "task_space_name": task_space_name,
+                            "task_assignees": task_assignees,
+                            "task_due_date": task_due_date,
+                            "task_created": task_created,
+                            "task_updated": task_updated,
+                        }
+                    )
 
                 except Exception as e:
                     logger.error(
-                        f"Error processing task {task.get('name', 'Unknown')}: {e!s}",
+                        f"Error in Phase 1 for task {task.get('name', 'Unknown')}: {e!s}",
                         exc_info=True,
                     )
-                    documents_skipped += 1
+                    documents_failed += 1
+                    continue
+
+        # Commit all pending documents - they all appear in UI now
+        if new_documents_created:
+            logger.info(
+                f"Phase 1: Committing {len([t for t in tasks_to_process if t['is_new']])} pending documents"
+            )
+            await session.commit()
+
+        # =======================================================================
+        # PHASE 2: Process each document one by one
+        # Each document transitions: pending → processing → ready/failed
+        # =======================================================================
+        logger.info(f"Phase 2: Processing {len(tasks_to_process)} documents")
+
+        for item in tasks_to_process:
+            # Send heartbeat periodically
+            if on_heartbeat_callback:
+                current_time = time.time()
+                if current_time - last_heartbeat_time >= HEARTBEAT_INTERVAL_SECONDS:
+                    await on_heartbeat_callback(documents_indexed)
+                    last_heartbeat_time = current_time
+
+            document = item["document"]
+            try:
+                # Set to PROCESSING and commit - shows "processing" in UI for THIS document only
+                document.status = DocumentStatus.processing()
+                await session.commit()
+
+                # Heavy processing (embeddings, chunks)
+
+                summary_content = item["task_content"]
+                summary_embedding = embed_text(item["task_content"])
+
+                chunks = await create_document_chunks(item["task_content"])
+
+                # Update document to READY with actual content
+                document.title = item["task_name"]
+                document.content = summary_content
+                document.content_hash = item["content_hash"]
+                document.embedding = summary_embedding
+                document.document_metadata = {
+                    "task_id": item["task_id"],
+                    "task_name": item["task_name"],
+                    "task_status": item["task_status"],
+                    "task_priority": item["task_priority"],
+                    "task_assignees": item["task_assignees"],
+                    "task_due_date": item["task_due_date"],
+                    "task_created": item["task_created"],
+                    "task_updated": item["task_updated"],
+                    "connector_id": connector_id,
+                    "indexed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                }
+                await safe_set_chunks(session, document, chunks)
+                document.updated_at = get_current_timestamp()
+                document.status = DocumentStatus.ready()
+
+                documents_indexed += 1
+
+                # Batch commit every 10 documents (for ready status updates)
+                if documents_indexed % 10 == 0:
+                    logger.info(
+                        f"Committing batch: {documents_indexed} ClickUp tasks processed so far"
+                    )
+                    await session.commit()
+
+            except Exception as e:
+                logger.error(
+                    f"Error processing task {item.get('task_name', 'Unknown')}: {e!s}",
+                    exc_info=True,
+                )
+                # Mark document as failed with reason (visible in UI)
+                try:
+                    document.status = DocumentStatus.failed(str(e))
+                    document.updated_at = get_current_timestamp()
+                    # Commit now so the failed status survives a later rollback or
+                    # crash; otherwise the doc stays stuck in pending/processing.
+                    await session.commit()
+                except Exception as status_error:
+                    logger.error(
+                        f"Failed to update document status to failed: {status_error}"
+                    )
+                    with contextlib.suppress(Exception):
+                        await session.rollback()
+                documents_failed += 1
+                continue
 
         total_processed = documents_indexed
 
-        if total_processed > 0:
-            await update_connector_last_indexed(session, connector, update_last_indexed)
+        # CRITICAL: Always update timestamp (even if 0 documents indexed) so Zero syncs
+        # This ensures the UI shows "Last indexed" instead of "Never indexed"
+        await update_connector_last_indexed(session, connector, update_last_indexed)
 
         # Final commit for any remaining documents not yet committed in batches
         logger.info(f"Final commit: Total {documents_indexed} ClickUp tasks processed")
-        await session.commit()
+        try:
+            await session.commit()
+            logger.info(
+                "Successfully committed all ClickUp document changes to database"
+            )
+        except Exception as e:
+            # Handle any remaining integrity errors gracefully (race conditions, etc.)
+            if (
+                "duplicate key value violates unique constraint" in str(e).lower()
+                or "uniqueviolationerror" in str(e).lower()
+            ):
+                logger.warning(
+                    f"Duplicate content_hash detected during final commit. "
+                    f"This may occur if the same task was indexed by multiple connectors. "
+                    f"Rolling back and continuing. Error: {e!s}"
+                )
+                await session.rollback()
+                # Don't fail the entire task - some documents may have been successfully indexed
+            else:
+                raise
 
         await task_logger.log_task_success(
             log_entry,
@@ -387,16 +485,28 @@ async def index_clickup_tasks(
                 "pages_processed": total_processed,
                 "documents_indexed": documents_indexed,
                 "documents_skipped": documents_skipped,
+                "documents_failed": documents_failed,
             },
         )
 
         logger.info(
-            f"clickup indexing completed: {documents_indexed} new tasks, {documents_skipped} skipped"
+            f"clickup indexing completed: {documents_indexed} ready, {documents_skipped} skipped, {documents_failed} failed"
         )
+
+        # Close client connection
+        try:
+            await clickup_client.close()
+        except Exception as e:
+            logger.warning(f"Error closing ClickUp client: {e!s}")
+
         return total_processed, None
 
     except SQLAlchemyError as db_error:
         await session.rollback()
+        # Clean up the connector in case of error
+        if "clickup_client" in locals():
+            with contextlib.suppress(Exception):
+                await clickup_client.close()
         await task_logger.log_task_failure(
             log_entry,
             f"Database error during ClickUp indexing for connector {connector_id}",
@@ -407,6 +517,10 @@ async def index_clickup_tasks(
         return 0, f"Database error: {db_error!s}"
     except Exception as e:
         await session.rollback()
+        # Clean up the connector in case of error
+        if "clickup_client" in locals():
+            with contextlib.suppress(Exception):
+                await clickup_client.close()
         await task_logger.log_task_failure(
             log_entry,
             f"Failed to index ClickUp tasks for connector {connector_id}",

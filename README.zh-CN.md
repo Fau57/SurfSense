@@ -1,358 +1,118 @@
-
-![new_header](https://github.com/user-attachments/assets/e236b764-0ddc-42ff-a1f1-8fbb3d2e0e65)
-
-
-<div align="center">
-<a href="https://discord.gg/ejRNvftDp9">
-<img src="https://img.shields.io/discord/1359368468260192417" alt="Discord">
-</a>
-</div>
+<!--
+  下线提示有时效：请在 2026 年 10 月 18 日删除它，并同时删除 README.md 中的同一条提示。
+  本文件与 README.md 逐节对应。
+  依据：plans/community-local/seo/06-repo-readme.md
+-->
 
 <div align="center">
 
-[English](README.md) | [简体中文](README.zh-CN.md)
+[![Stars](https://img.shields.io/github/stars/MODSetter/SurfSense?style=social)](https://github.com/MODSetter/SurfSense/stargazers)
+[![Latest release](https://img.shields.io/github/v/release/MODSetter/SurfSense?sort=semver)](https://github.com/MODSetter/SurfSense/releases)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+[![Discord](https://img.shields.io/discord/1359368468260192417?label=Discord)](https://discord.gg/ejRNvftDp9)
 
+  <a href="https://www.surfsense.com/"><img alt="SurfSense，可物理隔离运行的开源 NotebookLM 替代品" src="surfsense_web/public/homepage/banner.png" /></a>
+
+  <h1>SurfSense</h1>
+
+  <p>
+    <b>可物理隔离运行的开源 NotebookLM 替代品。</b>
+    <br />
+    在你自己的电脑上研究、转换和编辑文档的 AI 智能体。
+  </p>
+
+  <p>
+    <a href="https://www.surfsense.com/downloads"><b>下载</b></a> ·
+    <a href="#每种格式能做什么">格式</a> ·
+    <a href="#快速开始">快速开始</a> ·
+    <a href="#surfsense-与同类工具对比">对比</a> ·
+    <a href="#插件">插件</a> ·
+    <a href="https://www.surfsense.com/pricing">定价</a> ·
+    <a href="https://discord.gg/ejRNvftDp9">Discord</a>
+  </p>
+
+  <a href="https://trendshift.io/repositories/13606" target="_blank"><img src="https://trendshift.io/api/badge/repositories/13606" alt="MODSetter/SurfSense | Trendshift" width="250" height="55" /></a>
+
+  <p>
+    <a href="README.md">English</a> | <a href="README.ar.md">العربية</a> | <a href="README.de.md">Deutsch</a> | <a href="README.es.md">Español</a> | <a href="README.fr.md">Français</a> | <a href="README.hi.md">हिन्दी</a> | <a href="README.ja.md">日本語</a> | <a href="README.ko.md">한국어</a> | <a href="README.pt-BR.md">Português</a> | <a href="README.ru.md">Русский</a> | 简体中文
+  </p>
 </div>
 
-# SurfSense
+https://github.com/user-attachments/assets/88326b9d-e763-46db-9635-75f9df9e8682
 
-虽然像 NotebookLM 和 Perplexity 这样的工具在对任何主题/查询进行研究时令人印象深刻且非常有效，但 SurfSense 通过与您的个人知识库集成，将这一能力提升到了新的高度。它是一个高度可定制的 AI 研究助手，可以连接外部数据源，如搜索引擎（SearxNG、Tavily、LinkUp）、Slack、Linear、Jira、ClickUp、Confluence、Gmail、Notion、YouTube、GitHub、Discord、Airtable、Google Calendar、Luma、Elasticsearch 等，未来还会支持更多。
+SurfSense 是一款免费开源的桌面应用，专为那些不能上传的文档而做。它是一个注重隐私、类似 NotebookLM 的 AI 智能体，在你自己的电脑上研究、转换和编辑你的文档。索引留在你的硬盘里，模型由你来选，本地或远程都可以，而且不需要账号。
 
-<div align="center">
-<a href="https://trendshift.io/repositories/13606" target="_blank"><img src="https://trendshift.io/api/badge/repositories/13606" alt="MODSetter%2FSurfSense | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
-</div>
+| 平台 | 下载 |
+|---|---|
+| **Windows** x64 | [SurfSense-Setup.exe](https://github.com/MODSetter/SurfSense/releases/latest/download/SurfSense-Setup.exe) |
+| **macOS** Apple Silicon | [SurfSense-arm64.dmg](https://github.com/MODSetter/SurfSense/releases/latest/download/SurfSense-arm64.dmg) |
+| **Linux** x64 | [AppImage](https://github.com/MODSetter/SurfSense/releases/latest/download/SurfSense.AppImage) · [deb](https://github.com/MODSetter/SurfSense/releases/latest/download/SurfSense.deb) |
 
+> [!NOTE]
+> **用过托管版 Web 应用？** 请在 2026 年 10 月 18 日之前导出你的工作区，再导入到这里。详见[下线说明页](https://www.surfsense.com/sunset)。
 
-# 视频演示
+## 快速开始
 
+1. 安装 SurfSense，完成初始设置。
+2. 把文件或文件夹拖放到来源中。
+3. 让智能体搜索、提取或编辑你的文件。
 
-https://github.com/user-attachments/assets/d9221908-e0de-4b2f-ac3a-691cf4b202da
+## 每种格式能做什么
 
+| 格式 | 研究（带出处的回答） | 创建 | 编辑（以副本形式） | 转换 |
+|---|---|---|---|---|
+| **PDF** | ✓ 扫描页也可以³ | ✓ | 填写并拼合表单；添加水印、页码、页眉、页脚 | 合并、拆分、提取、旋转页面，调整页面顺序 |
+| **Word** `.docx` | ✓ | ✓ 也可以用你自己的 `.docx` 作模板 | ✓ 正文，以修订和批注的形式 | 转为 PDF¹ |
+| **Excel** `.xlsx` | ✓ 智能体还会读取公式 | ✓ 带公式和原生图表 | ✓ 单元格的值和公式 | 用 pandas 分析，并把结果做成图表 |
+| **PowerPoint** `.pptx` | ✓ | ✓ 也可以用你自己的 `.pptx` 作模板 | 替换幻灯片和备注中的文字；删除或复制幻灯片 | 转为 PDF¹ |
+| **CSV** | ✓ | — | — | 用 pandas 分析，并把结果做成图表 |
+| **图像** PNG、JPEG、TIFF、BMP、WebP | ✓ 通过 OCR 识别其中的文字³ | 图像和信息图² | — | 放入新文档 |
+| **Markdown**、纯文本 | ✓ | ✓ Markdown | — | — |
+| **HTML** | ✓ | ✓ 网页 | — | — |
+| **录音** WAV、MP3、FLAC、Ogg Vorbis | ✓ 在你的电脑上转写 | — | — | — |
+| **播客**（音频） | — | ✓ 附文字稿，默认在你的电脑上配音 | — | — |
+| **思维导图、记忆卡片、测验** | — | ✓ 在应用内 | — | — |
 
-## 播客示例
+<sub>¹ 需要在设置中开启 Office 支持（LibreOffice）；安装程序中从不包含它。² 需要一个图像模型，本地或远程均可；默认不选择任何模型。³ OCR 可识别拉丁字母、中文和日文。</sub>
 
-https://github.com/user-attachments/assets/a0a16566-6967-4374-ac51-9b3e07fbecd7
+编辑、转换和 PDF 工具总是生成一个新文件，你的原文件永远不会被改动。目前 PDF、Word 和 Excel 能做的事最多，对其他格式的支持也在不断改进。
 
+## 插件
 
+在**设置 › 插件**中连接它们。
 
+**SurfSense 提供：** 这些插件读取公开网页，不需要你自己的账号，但需要 SurfSense 许可证。[下载应用](https://www.surfsense.com/downloads)并在应用里填写你的邮箱，即可免费获得 30 天的许可证。
 
-## 核心功能
+| 插件 | 功能 |
+|---|---|
+| **Google Search** | 在 Google 上搜索，并读取搜索结果、广告和相关问题 |
+| **Web Crawl** | 读取单个网页，或把整个网站抓取为干净的文本 |
+| **YouTube** | 读取 YouTube 视频、频道及其评论 |
+| **TikTok** | 读取 TikTok 视频及其评论，搜索用户，查看当前的热门内容 |
+| **Google Maps** | 在 Google Maps 上查找地点，并读取这些地点的评价 |
+| **Amazon** | 读取 Amazon 商品和搜索结果 |
+| **Walmart** | 读取 Walmart 商品、搜索结果和评价 |
+| **Indeed** | 读取 Indeed 上的职位信息 |
 
-### 💡 **理念**: 
-- 拥有您自己的高度可定制的私有 NotebookLM 和 Perplexity，并与外部数据源集成。
+**第三方：** 来自[插件注册表](plugins/registry)的 MCP 服务器，例如 DeepWiki 和 Notion，或者你通过网址添加的任意服务器。不需要许可证；在你允许之前，它们一直保持关闭。
 
-### 📁 **支持多种文件格式上传**
-- 将您个人文件中的内容（文档、图像、视频，支持 **50+ 种文件扩展名**）保存到您自己的个人知识库。
+## SurfSense 与同类工具对比
 
-### 🔍 **强大的搜索功能**
-- 快速研究或查找已保存内容中的任何信息。
+| | NotebookLM（现为 Gemini Notebook） | SurfSense |
+|---|---|---|
+| 可离线 / 物理隔离运行 | 否 | **是** |
+| 文档会离开你的电脑 | 会 | **不会**，除非你选择远程模型 |
+| 能编辑你的文件 | 否 | **是** |
+| 开源 | 否 | **Apache-2.0** |
+| 模型 | 只能用 Gemini | 任意兼容 OpenAI 的 API，或本地模型 |
 
-### 💬 **与已保存内容对话**
-- 使用自然语言交互并获得引用答案。
+## 社区
 
-### 📄 **引用答案**
-- 像 Perplexity 一样获得带引用的答案。
+- [Discord](https://discord.gg/ejRNvftDp9) 用来求助，[Issues](https://github.com/MODSetter/SurfSense/issues) 用来报告缺陷，[Discussions](https://github.com/MODSetter/SurfSense/discussions) 用来交流想法。
+- **参与贡献：** PR 请提交到 `dev` 分支；开发流程见 [CONTRIBUTING.md](CONTRIBUTING.md) 和 [`surfsense_local/`](./surfsense_local)。工作原理见 [`docs/`](docs/README.md)。
 
-### 🔔 **隐私保护与本地 LLM 支持**
-- 完美支持 Ollama 本地大语言模型。
+<a href="https://github.com/MODSetter/SurfSense/graphs/contributors"><img src="https://contrib.rocks/image?repo=MODSetter/SurfSense" alt="为 SurfSense 做出贡献的人" /></a>
 
-### 🏠 **可自托管**
-- 开源且易于本地部署。
+## 许可证
 
-### 👥 **团队协作与 RBAC**
-- 搜索空间的基于角色的访问控制
-- 使用可自定义的角色（所有者、管理员、编辑者、查看者）邀请团队成员
-- 对文档、聊天、连接器和设置的细粒度权限控制
-- 在组织内安全共享知识库
-
-### 🎙️ **播客功能**
-- 超快速播客生成代理（在 20 秒内创建 3 分钟播客）
-- 将聊天对话转换为引人入胜的音频内容
-- 支持本地 TTS 提供商（Kokoro TTS）
-- 支持多个 TTS 提供商（OpenAI、Azure、Google Vertex AI）
-
-### 📊 **先进的 RAG 技术**
-- 支持 100+ 种大语言模型
-- 支持 6000+ 种嵌入模型
-- 支持所有主流重排序器（Pinecode、Cohere、Flashrank 等）
-- 使用层次化索引（2 层 RAG 设置）
-- 利用混合搜索（语义搜索 + 全文搜索，结合倒数排名融合）
-
-### ℹ️ **外部数据源**
-- 搜索引擎（Tavily、LinkUp）
-- SearxNG（自托管实例）
-- Slack
-- Linear
-- Jira
-- ClickUp
-- Confluence
-- Notion
-- Gmail
-- YouTube 视频
-- GitHub
-- Discord
-- Airtable
-- Google Calendar
-- Luma
-- Elasticsearch
-- 更多即将推出......
-
-## 📄 **支持的文件扩展名**
-
-| ETL 服务 | 格式 | 说明 |
-|----------|------|------|
-| **LlamaCloud** | 50+ 种格式 | 文档、演示文稿、电子表格、图像 |
-| **Unstructured** | 34+ 种格式 | 核心格式 + 电子邮件支持 |
-| **Docling** | 核心格式 | 本地处理，无需 API 密钥 |
-
-**音频/视频**（通过 STT 服务）：`.mp3`、`.wav`、`.mp4`、`.webm` 等
-
-### 🔖 **跨浏览器扩展**
-- SurfSense 扩展可用于保存您喜欢的任何网页
-- 主要用途是保存需要身份验证的受保护网页
-
-
-
-## 功能请求与未来规划
-
-**SurfSense 正在积极开发中。** 虽然它还未达到生产就绪状态，但您可以帮助我们加快进度。
-
-加入 [SurfSense Discord](https://discord.gg/ejRNvftDp9) 一起塑造 SurfSense 的未来！
-
-## 🚀 路线图
-
-随时了解我们的开发进度和即将推出的功能！  
-查看我们的公开路线图并贡献您的想法或反馈：
-
-**📋 路线图讨论：** [SurfSense 2025-2026 路线图：深度代理、实时协作与 MCP 服务器](https://github.com/MODSetter/SurfSense/discussions/565)
-
-**📊 看板：** [SurfSense 项目看板](https://github.com/users/MODSetter/projects/3)
-
-
-## 如何开始？
-
-### 使用 Docker 快速开始 🐳
-
-> [!TIP]
-> 对于生产部署，请使用完整的 [Docker Compose 设置](https://www.surfsense.com/docs/docker-installation)，它提供更多控制和可扩展性。
-
-**Linux/macOS:**
-
-```bash
-docker run -d -p 3000:3000 -p 8000:8000 \
-  -v surfsense-data:/data \
-  --name surfsense \
-  --restart unless-stopped \
-  ghcr.io/modsetter/surfsense:latest
-```
-
-**Windows (PowerShell):**
-
-```powershell
-docker run -d -p 3000:3000 -p 8000:8000 `
-  -v surfsense-data:/data `
-  --name surfsense `
-  --restart unless-stopped `
-  ghcr.io/modsetter/surfsense:latest
-```
-
-**使用自定义配置（例如 OpenAI 嵌入）：**
-
-```bash
-docker run -d -p 3000:3000 -p 8000:8000 \
-  -v surfsense-data:/data \
-  -e EMBEDDING_MODEL=openai://text-embedding-ada-002 \
-  -e OPENAI_API_KEY=your_openai_api_key \
-  --name surfsense \
-  --restart unless-stopped \
-  ghcr.io/modsetter/surfsense:latest
-```
-
-启动后，访问 SurfSense：
-- **前端**: [http://localhost:3000](http://localhost:3000)
-- **后端 API**: [http://localhost:8000](http://localhost:8000)
-- **API 文档**: [http://localhost:8000/docs](http://localhost:8000/docs)
-
-**常用命令：**
-
-```bash
-docker logs -f surfsense      # 查看日志
-docker stop surfsense         # 停止
-docker start surfsense        # 启动
-docker rm surfsense           # 删除（数据保留在卷中）
-```
-
-### 安装选项
-
-SurfSense 提供多种入门方式：
-
-1. **[SurfSense Cloud](https://www.surfsense.com/login)** - 无需任何设置即可试用 SurfSense 的最简单方法。
-   - 无需安装
-   - 即时访问所有功能
-   - 非常适合快速上手
-
-2. **快速启动 Docker（上述方法）** - 一条命令即可在本地运行 SurfSense。
-   - 一体化镜像，捆绑 PostgreSQL、Redis 和所有服务
-   - 非常适合评估、开发和小型部署
-   - 数据通过 Docker 卷持久化
-
-3. **[Docker Compose（生产环境）](https://www.surfsense.com/docs/docker-installation)** - 使用独立服务进行完整堆栈部署。
-   - 包含 pgAdmin，通过 Web UI 进行数据库管理
-   - 支持通过 `.env` 文件自定义环境变量
-   - 灵活的部署选项（完整堆栈或仅核心服务）
-   - 更适合生产环境，支持独立扩展服务
-
-4. **[手动安装](https://www.surfsense.com/docs/manual-installation)** - 适合希望对设置有更多控制或需要自定义部署的用户。
-
-Docker 和手动安装指南都包含适用于 Windows、macOS 和 Linux 的详细操作系统特定说明。
-
-在自托管安装之前，请确保完成[先决条件设置步骤](https://www.surfsense.com/docs/)，包括：
-- 身份验证设置（可选 - 默认为 LOCAL 身份验证）
-- **文件处理 ETL 服务**（可选 - 默认为 Docling）：
-  - Docling（默认，本地处理，无需 API 密钥，支持 PDF、Office 文档、图像、HTML、CSV）
-  - Unstructured.io API 密钥（支持 34+ 种格式）
-  - LlamaIndex API 密钥（增强解析，支持 50+ 种格式）
-- 其他根据用例需要的 API 密钥
-
-## 截图
-
-**研究助手** 
-
-![updated_researcher](https://github.com/user-attachments/assets/e22c5d86-f511-4c72-8c50-feba0c1561b4)
-
-**搜索空间** 
-
-![search_spaces](https://github.com/user-attachments/assets/e254c38c-f937-44b6-9e9d-770db583d099)
-
-**管理文档** 
-![documents](https://github.com/user-attachments/assets/7001e306-eb06-4009-89c6-8fadfdc3fc4d)
-
-**播客助手** 
-![podcasts](https://github.com/user-attachments/assets/6cb82ffd-9e14-4172-bc79-67faf34c4c1c)
-
-
-**对话助手** 
-
-![git_chat](https://github.com/user-attachments/assets/bb352d52-1c6d-4020-926b-722d0b98b491)
-
-**浏览器扩展**
-
-![ext1](https://github.com/user-attachments/assets/1f042b7a-6349-422b-94fb-d40d0df16c40)
-
-![ext2](https://github.com/user-attachments/assets/a9b9f1aa-2677-404d-b0a0-c1b2dddf24a7)
-
-
-## 技术栈
-
-
- ### **后端** 
-
--  **FastAPI**：现代、快速的 Python Web 框架，用于构建 API
-  
--  **PostgreSQL with pgvector**：具有向量搜索功能的数据库，用于相似性搜索
-
--  **SQLAlchemy**：SQL 工具包和 ORM（对象关系映射），用于数据库交互
-
--  **Alembic**：SQLAlchemy 的数据库迁移工具
-
--  **FastAPI Users**：使用 JWT 和 OAuth 支持的身份验证和用户管理
-
--  **LangGraph**：用于开发 AI 代理的框架
-  
--  **LangChain**：用于开发 AI 驱动应用程序的框架
-
--  **LLM 集成**：通过 LiteLLM 与大语言模型集成
-
--  **Rerankers**：先进的结果排序，提高搜索相关性
-
--  **混合搜索**：结合向量相似性和全文搜索，使用倒数排名融合 (RRF) 获得最佳结果
-
--  **向量嵌入**：文档和文本嵌入，用于语义搜索
-
--  **pgvector**：PostgreSQL 扩展，用于高效的向量相似性操作
-
--  **Redis**：内存数据结构存储，用作 Celery 的消息代理和结果后端
-
--  **Celery**：分布式任务队列，用于处理异步后台任务（文档处理、播客生成等）
-
--  **Flower**：Celery 任务队列的实时监控和管理工具
-
--  **Chonkie**：先进的文档分块和嵌入库
- - 使用 `AutoEmbeddings` 灵活选择嵌入模型
- -  `LateChunker` 基于嵌入模型的最大序列长度优化文档分块
-
-  
----
- ### **前端**
-
--  **Next.js 15.2.3**：React 框架，具有应用路由器、服务器组件、自动代码拆分和优化渲染功能
-
--  **React 19.0.0**：用于构建用户界面的 JavaScript 库
-
--  **TypeScript**：JavaScript 的静态类型检查，提升代码质量和开发体验
-
-- **Vercel AI SDK Kit UI Stream Protocol**：创建可扩展的聊天 UI
-
--  **Tailwind CSS 4.x**：实用优先的 CSS 框架，用于构建自定义 UI 设计
-
--  **Shadcn**：无头组件库
-
--  **Lucide React**：作为 React 组件实现的图标集
-
--  **Framer Motion**：React 动画库
-
--  **Sonner**：Toast 通知库
-
--  **Geist**：Vercel 的字体系列
-
--  **React Hook Form**：表单状态管理和验证
-
--  **Zod**：TypeScript 优先的模式验证，带静态类型推断
-
--  **@hookform/resolvers**：用于在 React Hook Form 中使用验证库的解析器
-
--  **@tanstack/react-table**：用于构建强大表格和数据网格的无头 UI
-
-
- ### **DevOps**
-
--  **Docker**：容器平台，用于跨环境的一致部署
-  
--  **Docker Compose**：用于定义和运行多容器 Docker 应用程序的工具
-
--  **pgAdmin**：Docker 设置中包含的基于 Web 的 PostgreSQL 管理工具
-
-
-### **扩展** 
-基于 Plasmo 的 Manifest v3
-
-
-## 贡献
-
-非常欢迎贡献！贡献可以小到一个 ⭐，甚至是发现和创建问题。
-后端的微调总是受欢迎的。
-
-有关详细的贡献指南，请参阅我们的 [CONTRIBUTING.md](CONTRIBUTING.md) 文件。
-
-## Star 历史
-
-<a href="https://www.star-history.com/#MODSetter/SurfSense&Date">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=MODSetter/SurfSense&type=Date&theme=dark" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=MODSetter/SurfSense&type=Date" />
-   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=MODSetter/SurfSense&type=Date" />
- </picture>
-</a>
-
----
----
-<p align="center">
-    <img 
-      src="https://github.com/user-attachments/assets/329c9bc2-6005-4aed-a629-700b5ae296b4" 
-      alt="Catalyst Project" 
-      width="200"
-    />
-</p>
-
----
----
+Apache-2.0。详见 [LICENSE](LICENSE)。

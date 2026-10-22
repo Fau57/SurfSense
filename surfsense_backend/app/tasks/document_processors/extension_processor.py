@@ -9,25 +9,25 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import Document, DocumentType
 from app.schemas import ExtensionDocumentContent
-from app.services.llm_service import get_user_long_context_llm
 from app.services.task_logging_service import TaskLoggingService
 from app.utils.document_converters import (
     create_document_chunks,
+    embed_text,
     generate_content_hash,
-    generate_document_summary,
     generate_unique_identifier_hash,
 )
 
 from .base import (
     check_document_by_unique_identifier,
     get_current_timestamp,
+    safe_set_chunks,
 )
 
 
 async def add_extension_received_document(
     session: AsyncSession,
     content: ExtensionDocumentContent,
-    search_space_id: int,
+    workspace_id: int,
     user_id: str,
 ) -> Document | None:
     """
@@ -36,13 +36,13 @@ async def add_extension_received_document(
     Args:
         session: Database session
         content: Document content from extension
-        search_space_id: ID of the search space
+        workspace_id: ID of the workspace
         user_id: ID of the user
 
     Returns:
         Document object if successful, None if failed
     """
-    task_logger = TaskLoggingService(session, search_space_id)
+    task_logger = TaskLoggingService(session, workspace_id)
 
     # Log task start
     log_entry = await task_logger.log_task_start(
@@ -72,7 +72,7 @@ async def add_extension_received_document(
             ),
             (
                 "CONTENT",
-                ["FORMAT: markdown", "TEXT_START", content.pageContent, "TEXT_END"],
+                ["FORMAT: markdown", "TEXT_START", content.page_content, "TEXT_END"],
             ),
         ]
 
@@ -90,11 +90,11 @@ async def add_extension_received_document(
 
         # Generate unique identifier hash for this extension document (using URL)
         unique_identifier_hash = generate_unique_identifier_hash(
-            DocumentType.EXTENSION, content.metadata.VisitedWebPageURL, search_space_id
+            DocumentType.EXTENSION, content.metadata.VisitedWebPageURL, workspace_id
         )
 
         # Generate content hash
-        content_hash = generate_content_hash(combined_document_string, search_space_id)
+        content_hash = generate_content_hash(combined_document_string, workspace_id)
 
         # Check if document with this unique identifier already exists
         existing_document = await check_document_by_unique_identifier(
@@ -122,39 +122,11 @@ async def add_extension_received_document(
                     f"Content changed for URL {content.metadata.VisitedWebPageURL}. Updating document."
                 )
 
-        # Get user's long context LLM (needed for both create and update)
-        user_llm = await get_user_long_context_llm(session, user_id, search_space_id)
-        if not user_llm:
-            raise RuntimeError(
-                f"No long context LLM configured for user {user_id} in search space {search_space_id}"
-            )
-
-        # Generate summary with metadata
-        document_metadata = {
-            "session_id": content.metadata.BrowsingSessionId,
-            "url": content.metadata.VisitedWebPageURL,
-            "title": content.metadata.VisitedWebPageTitle,
-            "referrer": content.metadata.VisitedWebPageReffererURL,
-            "timestamp": content.metadata.VisitedWebPageDateWithTimeInISOString,
-            "duration_ms": content.metadata.VisitedWebPageVisitDurationInMilliseconds,
-            "document_type": "Browser Extension Capture",
-        }
-        summary_content, summary_embedding = await generate_document_summary(
-            combined_document_string, user_llm, document_metadata
-        )
+        summary_content = combined_document_string
+        summary_embedding = embed_text(summary_content)
 
         # Process chunks
-        chunks = await create_document_chunks(content.pageContent)
-
-        from app.utils.blocknote_converter import convert_markdown_to_blocknote
-
-        # Convert markdown to BlockNote JSON
-        blocknote_json = await convert_markdown_to_blocknote(combined_document_string)
-        if not blocknote_json:
-            logging.warning(
-                f"Failed to convert extension document '{content.metadata.VisitedWebPageTitle}' "
-                f"to BlockNote JSON, document will not be editable"
-            )
+        chunks = await create_document_chunks(content.page_content)
 
         # Update or create document
         if existing_document:
@@ -164,8 +136,8 @@ async def add_extension_received_document(
             existing_document.content_hash = content_hash
             existing_document.embedding = summary_embedding
             existing_document.document_metadata = content.metadata.model_dump()
-            existing_document.chunks = chunks
-            existing_document.blocknote_document = blocknote_json
+            await safe_set_chunks(session, existing_document, chunks)
+            existing_document.source_markdown = combined_document_string
             existing_document.updated_at = get_current_timestamp()
 
             await session.commit()
@@ -174,7 +146,7 @@ async def add_extension_received_document(
         else:
             # Create new document
             document = Document(
-                search_space_id=search_space_id,
+                workspace_id=workspace_id,
                 title=content.metadata.VisitedWebPageTitle,
                 document_type=DocumentType.EXTENSION,
                 document_metadata=content.metadata.model_dump(),
@@ -183,13 +155,18 @@ async def add_extension_received_document(
                 chunks=chunks,
                 content_hash=content_hash,
                 unique_identifier_hash=unique_identifier_hash,
-                blocknote_document=blocknote_json,
+                source_markdown=combined_document_string,
                 updated_at=get_current_timestamp(),
+                created_by_id=user_id,
             )
 
             session.add(document)
             await session.commit()
             await session.refresh(document)
+
+        from app.knowledge_store.service import record_prepared_documents
+
+        await record_prepared_documents(session, [document])
 
         # Log success
         await task_logger.log_task_success(

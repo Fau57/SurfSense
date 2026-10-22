@@ -1,6 +1,17 @@
-import type z from "zod";
-import { getBearerToken, handleUnauthorized } from "../auth-utils";
-import { AppError, AuthenticationError, AuthorizationError, NotFoundError } from "../error";
+import type { ZodType } from "zod";
+import { getDesktopAccessToken } from "@/lib/auth-fetch";
+import { buildBackendUrl } from "@/lib/env-config";
+import { getClientPlatform } from "../agent-filesystem";
+import { handleUnauthorized, refreshSession } from "../auth-utils";
+import {
+	AbortedError,
+	AppError,
+	AuthenticationError,
+	AuthorizationError,
+	NetworkError,
+	NotFoundError,
+	type ValidationFieldError,
+} from "../error";
 
 enum ResponseType {
 	JSON = "json",
@@ -10,34 +21,105 @@ enum ResponseType {
 	// Add more response types as needed
 }
 
+const REFRESH_RETRY_BLOCK_MS = 30_000;
+const refreshRetryBlockedUntil = new Map<string, number>();
+
+function getRefreshRetryKey(method: RequestOptions["method"], url: string): string {
+	return `${method}:${url}`;
+}
+
+function isRefreshRetryBlocked(key: string): boolean {
+	const blockedUntil = refreshRetryBlockedUntil.get(key);
+	if (!blockedUntil) return false;
+	if (Date.now() < blockedUntil) return true;
+	refreshRetryBlockedUntil.delete(key);
+	return false;
+}
+
+function blockRefreshRetry(key: string): void {
+	refreshRetryBlockedUntil.set(key, Date.now() + REFRESH_RETRY_BLOCK_MS);
+}
+
+// One dropped connection fails every in-flight request and each query retry,
+// so an unthrottled capture reports a single blip as dozens of events. Keeping
+// the first per endpoint per window preserves which endpoints were affected
+// while making the per-session count mean something.
+const CAPTURE_DEDUPE_MS = 30_000;
+const lastCapturedAt = new Map<string, number>();
+
+function isDuplicateCapture(key: string): boolean {
+	const now = Date.now();
+	const previous = lastCapturedAt.get(key);
+	if (previous !== undefined && now - previous < CAPTURE_DEDUPE_MS) return true;
+	lastCapturedAt.set(key, now);
+	return false;
+}
+
+/**
+ * Send an API failure to PostHog error tracking. Scoped by the caller to only
+ * 5xx server faults + network outages — 4xx responses are expected behavior.
+ * Lazy-imports posthog-js so an ad-blocker can never break the request path.
+ */
+function captureApiException(error: unknown, url: string, method?: RequestOptions["method"]): void {
+	const code = error instanceof AppError ? error.code : undefined;
+	if (code === "NETWORK_ERROR" && isDuplicateCapture(`${method ?? "GET"}:${url}`)) return;
+
+	import("posthog-js")
+		.then(({ default: posthog }) => {
+			posthog.captureException(error, {
+				api_url: url,
+				api_method: method ?? "GET",
+				// `api_url` is relative, so our own backend misconfiguration and a
+				// user simply being offline used to look identical in PostHog.
+				api_host: safeHost(buildBackendUrl(url)),
+				client_platform: typeof window === "undefined" ? "web" : getClientPlatform(),
+				navigator_online: typeof navigator === "undefined" ? null : navigator.onLine,
+				...(error instanceof AppError && {
+					status_code: error.status,
+					status_text: error.statusText,
+					error_code: error.code,
+					request_id: error.requestId,
+				}),
+			});
+		})
+		.catch(() => {
+			console.error("Failed to capture exception in PostHog");
+		});
+}
+
+function safeHost(url: string): string | null {
+	try {
+		return new URL(url, typeof window === "undefined" ? undefined : window.location.origin).host;
+	} catch {
+		return null;
+	}
+}
+
 export type RequestOptions = {
-	method: "GET" | "POST" | "PUT" | "DELETE";
+	method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+	sameOrigin?: boolean;
 	headers?: Record<string, string>;
 	contentType?: "application/json" | "application/x-www-form-urlencoded";
 	signal?: AbortSignal;
-	body?: any;
+	body?: unknown;
 	responseType?: ResponseType;
+	_isRetry?: boolean; // Internal flag to prevent infinite retry loops
 	// Add more options as needed
 };
 
 class BaseApiService {
-	bearerToken: string;
-	baseUrl: string;
+	noAuthEndpoints: string[] = ["/auth/jwt/login", "/auth/register", "/auth/jwt/refresh"];
 
-	noAuthEndpoints: string[] = ["/auth/jwt/login", "/auth/register", "/auth/refresh"]; // Add more endpoints as needed
+	// Prefixes that don't require auth (checked with startsWith)
+	noAuthPrefixes: string[] = ["/api/v1/public/"];
 
-	constructor(bearerToken: string, baseUrl: string) {
-		this.bearerToken = bearerToken;
-		this.baseUrl = baseUrl;
-	}
-
-	setBearerToken(bearerToken: string) {
-		this.bearerToken = bearerToken;
+	get isDesktopClient(): boolean {
+		return typeof window !== "undefined" && !!window.electronAPI;
 	}
 
 	async request<T, R extends ResponseType = ResponseType.JSON>(
 		url: string,
-		responseSchema?: z.ZodSchema<T>,
+		responseSchema?: ZodType<T>,
 		options?: RequestOptions & { responseType?: R }
 	): Promise<
 		R extends ResponseType.JSON
@@ -56,9 +138,17 @@ class BaseApiService {
 			 * REQUEST
 			 * ----------
 			 */
+			const isNoAuthEndpoint =
+				this.noAuthEndpoints.includes(url) ||
+				this.noAuthPrefixes.some((prefix) => url.startsWith(prefix)) ||
+				/^\/api\/v1\/invites\/[^/]+\/info$/.test(url);
+			const desktopAccessToken =
+				this.isDesktopClient && !isNoAuthEndpoint ? (await getDesktopAccessToken()) || "" : "";
 			const defaultOptions: RequestOptions = {
 				headers: {
-					Authorization: `Bearer ${this.bearerToken || ""}`,
+					...(desktopAccessToken ? { Authorization: `Bearer ${desktopAccessToken}` } : {}),
+					"X-SurfSense-Client-Platform":
+						typeof window === "undefined" ? "web" : getClientPlatform(),
 				},
 				method: "GET",
 				responseType: ResponseType.JSON,
@@ -73,24 +163,22 @@ class BaseApiService {
 				},
 			};
 
-			// Validate the base URL
-			if (!this.baseUrl) {
-				throw new AppError("Base URL is not set.");
-			}
-
-			// Validate the bearer token
-			if (!this.bearerToken && !this.noAuthEndpoints.includes(url)) {
+			const refreshRetryKey = getRefreshRetryKey(mergedOptions.method, url);
+			if (this.isDesktopClient && !desktopAccessToken && !isNoAuthEndpoint) {
+				// Desktop refresh token is gone/revoked — send the user to /desktop/login
+				// (same treatment as a server 401 below) instead of erroring in place.
+				handleUnauthorized();
 				throw new AuthenticationError("You are not authenticated. Please login again.");
 			}
 
-			// Construct the full URL
-			const fullUrl = new URL(url, this.baseUrl).toString();
+			const fullUrl = mergedOptions.sameOrigin ? url : buildBackendUrl(url);
 
 			// Prepare fetch options
 			const fetchOptions: RequestInit = {
 				method: mergedOptions.method,
 				headers: mergedOptions.headers,
 				signal: mergedOptions.signal,
+				credentials: "include",
 			};
 
 			// Automatically stringify body if Content-Type is application/json and body is an object
@@ -99,8 +187,9 @@ class BaseApiService {
 				if (contentType === "application/json" && typeof mergedOptions.body === "object") {
 					fetchOptions.body = JSON.stringify(mergedOptions.body);
 				} else {
-					// Pass body as-is for other content types (e.g., form data, already stringified)
-					fetchOptions.body = mergedOptions.body;
+					// Pass body as-is for other content types (form data, already stringified).
+					// Caller is responsible for passing a real BodyInit when Content-Type is not JSON.
+					fetchOptions.body = mergedOptions.body as BodyInit;
 				}
 			}
 
@@ -124,64 +213,115 @@ class BaseApiService {
 					throw new AppError("Failed to parse response", response.status, response.statusText);
 				}
 
-				// For fastapi errors response
-				if (typeof data === "object" && "detail" in data) {
-					throw new AppError(data.detail, response.status, response.statusText);
+				// Extract structured fields from new envelope or legacy shape
+				const envelope = typeof data === "object" && data?.error;
+				const errorMessage: string =
+					envelope?.message ??
+					(typeof data === "object" && typeof data?.detail === "string" ? data.detail : "");
+				const errorCode: string | undefined = envelope?.code;
+				const requestId: string | undefined =
+					envelope?.request_id ?? response.headers.get("X-Request-ID") ?? undefined;
+				const reportUrl: string | undefined = envelope?.report_url;
+				const validationFields: ValidationFieldError[] | undefined = Array.isArray(envelope?.fields)
+					? envelope.fields
+					: undefined;
+
+				// Handle 401 - try to refresh token first (only once)
+				if (response.status === 401) {
+					if (options?._isRetry) {
+						blockRefreshRetry(refreshRetryKey);
+					} else if (!isNoAuthEndpoint && !isRefreshRetryBlocked(refreshRetryKey)) {
+						const refreshed = await refreshSession();
+						if (refreshed) {
+							const newToken = this.isDesktopClient
+								? (await getDesktopAccessToken({ forceRefresh: true })) || ""
+								: "";
+							return this.request(url, responseSchema, {
+								...mergedOptions,
+								headers: {
+									...mergedOptions.headers,
+									...(this.isDesktopClient ? { Authorization: `Bearer ${newToken}` } : {}),
+								},
+								_isRetry: true,
+							} as RequestOptions & { responseType?: R });
+						}
+						blockRefreshRetry(refreshRetryKey);
+					}
+					handleUnauthorized();
+					throw new AuthenticationError(
+						errorMessage || "You are not authenticated. Please login again.",
+						response.status,
+						response.statusText
+					);
 				}
 
+				// Map status to typed error
 				switch (response.status) {
-					case 401:
-						// Use centralized auth handler for 401 responses
-						handleUnauthorized();
-						throw new AuthenticationError(
-							"You are not authenticated. Please login again.",
-							response.status,
-							response.statusText
-						);
 					case 403:
 						throw new AuthorizationError(
-							"You don't have permission to access this resource.",
+							errorMessage || "You don't have permission to access this resource.",
 							response.status,
 							response.statusText
 						);
 					case 404:
-						throw new NotFoundError("Resource not found", response.status, response.statusText);
-					//  Add more cases as needed
-					default:
-						throw new AppError("Something went wrong", response.status, response.statusText);
+						throw new NotFoundError(
+							errorMessage || "Resource not found",
+							response.status,
+							response.statusText
+						);
+					default: {
+						const appError = new AppError(
+							errorMessage || "Something went wrong",
+							response.status,
+							response.statusText,
+							errorCode,
+							requestId,
+							reportUrl
+						);
+						appError.fields = validationFields;
+						throw appError;
+					}
 				}
 			}
+			refreshRetryBlockedUntil.delete(getRefreshRetryKey(mergedOptions.method, url));
 
 			// biome-ignore lint/suspicious: Unknown
 			let data;
 			const responseType = mergedOptions.responseType;
 
-			try {
-				switch (responseType) {
-					case ResponseType.JSON:
-						data = await response.json();
-						break;
-					case ResponseType.TEXT:
-						data = await response.text();
-						break;
-					case ResponseType.BLOB:
-						data = await response.blob();
-						break;
-					case ResponseType.ARRAY_BUFFER:
-						data = await response.arrayBuffer();
-						break;
-					//  Add more cases as needed
-					default:
-						data = await response.json();
+			if (response.status === 204) {
+				// 204 No Content has no body; .json() would throw SyntaxError.
+				// Leave data as null and skip schema validation below so endpoints
+				// that opt out of bodies (REST-style DELETE) don't error on success.
+				data = null;
+			} else {
+				try {
+					switch (responseType) {
+						case ResponseType.JSON:
+							data = await response.json();
+							break;
+						case ResponseType.TEXT:
+							data = await response.text();
+							break;
+						case ResponseType.BLOB:
+							data = await response.blob();
+							break;
+						case ResponseType.ARRAY_BUFFER:
+							data = await response.arrayBuffer();
+							break;
+						//  Add more cases as needed
+						default:
+							data = await response.json();
+					}
+				} catch (error) {
+					console.error("Failed to parse response as JSON:", error);
+					throw new AppError("Failed to parse response", response.status, response.statusText);
 				}
-			} catch (error) {
-				console.error("Failed to parse response as JSON:", error);
-				throw new AppError("Failed to parse response", response.status, response.statusText);
 			}
 
 			// Validate response
 			if (responseType === ResponseType.JSON) {
-				if (!responseSchema) {
+				if (!responseSchema || response.status === 204) {
 					return data;
 				}
 				const parsedData = responseSchema.safeParse(data);
@@ -199,14 +339,44 @@ class BaseApiService {
 
 			return data;
 		} catch (error) {
-			console.error("Request failed:", JSON.stringify(error));
+			// Normalize browser-level fetch failures before anything else
+			if (error instanceof DOMException && error.name === "AbortError") {
+				throw new AbortedError();
+			}
+			if (error instanceof TypeError && !(error instanceof AppError)) {
+				const networkError = new NetworkError(
+					"Unable to connect to the server. Check your internet connection and try again."
+				);
+				// Network failures are genuine outages worth tracking.
+				captureApiException(networkError, url, options?.method);
+				throw networkError;
+			}
+
+			// Handled client errors (validation, credits, auth, not-found, ...) are
+			// expected outcomes surfaced to the user via typed errors + toasts — not
+			// app faults. Skip logging/telemetry for them so they don't spam the
+			// console, PostHog, or Next.js's dev error overlay.
+			const isHandledClientError =
+				error instanceof AppError &&
+				typeof error.status === "number" &&
+				error.status >= 400 &&
+				error.status < 500;
+
+			if (!isHandledClientError) {
+				console.error("Request failed:", JSON.stringify(error));
+				// Only 5xx server faults are unexpected; 4xx are handled above and
+				// network outages were already captured before this point.
+				if (error instanceof AppError && error.status >= 500) {
+					captureApiException(error, url, options?.method);
+				}
+			}
 			throw error;
 		}
 	}
 
 	async get<T>(
 		url: string,
-		responseSchema?: z.ZodSchema<T>,
+		responseSchema?: ZodType<T>,
 		options?: Omit<RequestOptions, "method" | "responseType">
 	) {
 		return this.request(url, responseSchema, {
@@ -221,7 +391,7 @@ class BaseApiService {
 
 	async post<T>(
 		url: string,
-		responseSchema?: z.ZodSchema<T>,
+		responseSchema?: ZodType<T>,
 		options?: Omit<RequestOptions, "method" | "responseType">
 	) {
 		return this.request(url, responseSchema, {
@@ -236,7 +406,7 @@ class BaseApiService {
 
 	async put<T>(
 		url: string,
-		responseSchema?: z.ZodSchema<T>,
+		responseSchema?: ZodType<T>,
 		options?: Omit<RequestOptions, "method" | "responseType">
 	) {
 		return this.request(url, responseSchema, {
@@ -251,11 +421,26 @@ class BaseApiService {
 
 	async delete<T>(
 		url: string,
-		responseSchema?: z.ZodSchema<T>,
+		responseSchema?: ZodType<T>,
 		options?: Omit<RequestOptions, "method" | "responseType">
 	) {
 		return this.request(url, responseSchema, {
 			method: "DELETE",
+			headers: {
+				"Content-Type": "application/json",
+			},
+			...options,
+			responseType: ResponseType.JSON,
+		});
+	}
+
+	async patch<T>(
+		url: string,
+		responseSchema?: ZodType<T>,
+		options?: Omit<RequestOptions, "method" | "responseType">
+	) {
+		return this.request(url, responseSchema, {
+			method: "PATCH",
 			headers: {
 				"Content-Type": "application/json",
 			},
@@ -274,18 +459,18 @@ class BaseApiService {
 
 	async postFormData<T>(
 		url: string,
-		responseSchema?: z.ZodSchema<T>,
+		responseSchema?: ZodType<T>,
 		options?: Omit<RequestOptions, "method" | "responseType" | "body"> & { body: FormData }
 	) {
 		// Remove Content-Type from options headers if present
-		const { "Content-Type": _, ...headersWithoutContentType } = options?.headers ?? {};
+		const headersWithoutContentType = { ...(options?.headers ?? {}) };
+		delete headersWithoutContentType["Content-Type"];
 
 		return this.request(url, responseSchema, {
 			method: "POST",
 			...options,
 			headers: {
 				// Don't set Content-Type - let browser set it with multipart boundary
-				Authorization: `Bearer ${this.bearerToken}`,
 				...headersWithoutContentType,
 			},
 			responseType: ResponseType.JSON,
@@ -293,7 +478,4 @@ class BaseApiService {
 	}
 }
 
-export const baseApiService = new BaseApiService(
-	typeof window !== "undefined" ? getBearerToken() || "" : "",
-	process.env.NEXT_PUBLIC_FASTAPI_BACKEND_URL || ""
-);
+export const baseApiService = new BaseApiService();

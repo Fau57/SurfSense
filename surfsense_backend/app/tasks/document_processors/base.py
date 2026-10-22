@@ -14,6 +14,37 @@ from app.db import Document
 md = MarkdownifyTransformer()
 
 
+async def safe_set_chunks(
+    session: "AsyncSession", document: Document, chunks: list
+) -> None:
+    """
+    Delete old chunks and assign new ones to a document.
+
+    This replaces direct ``document.chunks = chunks`` which triggers lazy
+    loading (and MissingGreenlet errors in async contexts).  It also
+    explicitly deletes pre-existing chunks so they don't accumulate across
+    repeated re-indexes — ``set_committed_value`` bypasses SQLAlchemy's
+    delete-orphan cascade.
+
+    Args:
+        session: The current async database session.
+        document: The Document object to update.
+        chunks: List of Chunk objects to assign.
+    """
+    from sqlalchemy import delete
+    from sqlalchemy.orm.attributes import set_committed_value
+
+    from app.db import Chunk
+
+    if document.id is not None:
+        await session.execute(delete(Chunk).where(Chunk.document_id == document.id))
+        for chunk in chunks:
+            chunk.document_id = document.id
+
+    set_committed_value(document, "chunks", chunks)
+    session.add_all(chunks)
+
+
 def get_current_timestamp() -> datetime:
     """
     Get the current timestamp with timezone for updated_at field.

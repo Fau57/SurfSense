@@ -38,7 +38,7 @@ class RoleRead(RoleBase):
     """Schema for reading a role."""
 
     id: int
-    search_space_id: int
+    workspace_id: int
     is_system_role: bool
     created_at: datetime
 
@@ -66,15 +66,18 @@ class MembershipRead(BaseModel):
 
     id: int
     user_id: UUID
-    search_space_id: int
+    workspace_id: int
     role_id: int | None
     is_owner: bool
     joined_at: datetime
     created_at: datetime
     # Nested role info
     role: RoleRead | None = None
-    # User email (populated separately)
+    # User details (populated separately)
     user_email: str | None = None
+    user_display_name: str | None = None
+    user_avatar_url: str | None = None
+    user_last_login: datetime | None = None
 
     class Config:
         from_attributes = True
@@ -120,7 +123,7 @@ class InviteRead(InviteBase):
 
     id: int
     invite_code: str
-    search_space_id: int
+    workspace_id: int
     created_by_id: UUID | None
     uses_count: int
     is_active: bool
@@ -142,15 +145,15 @@ class InviteAcceptResponse(BaseModel):
     """Response schema for accepting an invite."""
 
     message: str
-    search_space_id: int
-    search_space_name: str
+    workspace_id: int
+    workspace_name: str
     role_name: str | None
 
 
 class InviteInfoResponse(BaseModel):
     """Response schema for getting invite info (public endpoint)."""
 
-    search_space_name: str
+    workspace_name: str
     role_name: str | None
     is_valid: bool
     message: str | None = None
@@ -165,6 +168,7 @@ class PermissionInfo(BaseModel):
     value: str
     name: str
     category: str
+    description: str
 
 
 class PermissionsListResponse(BaseModel):
@@ -176,11 +180,11 @@ class PermissionsListResponse(BaseModel):
 # ============ User Access Info ============
 
 
-class UserSearchSpaceAccess(BaseModel):
-    """Schema for user's access info in a search space."""
+class UserWorkspaceAccess(BaseModel):
+    """Schema for user's access info in a workspace."""
 
-    search_space_id: int
-    search_space_name: str
+    workspace_id: int
+    workspace_name: str
     is_owner: bool
     role_name: str | None
     permissions: list[str]

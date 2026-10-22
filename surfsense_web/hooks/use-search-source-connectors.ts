@@ -1,14 +1,14 @@
 import { useCallback, useEffect, useState } from "react";
-import { authenticatedFetch, getBearerToken, handleUnauthorized } from "@/lib/auth-utils";
-
+import { authenticatedFetch } from "@/lib/auth-fetch";
+import { buildBackendUrl } from "@/lib/env-config";
 export interface SearchSourceConnector {
 	id: number;
 	name: string;
 	connector_type: string;
 	is_indexable: boolean;
 	last_indexed_at: string | null;
-	config: Record<string, any>;
-	search_space_id: number;
+	config: Record<string, unknown>;
+	workspace_id: number;
 	user_id?: string;
 	created_at?: string;
 	periodic_indexing_enabled: boolean;
@@ -20,15 +20,15 @@ export interface ConnectorSourceItem {
 	id: number;
 	name: string;
 	type: string;
-	sources: any[];
+	sources: unknown[];
 }
 
 /**
  * Hook to fetch search source connectors from the API
  * @param lazy - If true, connectors won't be fetched on mount
- * @param searchSpaceId - Optional search space ID to filter connectors
+ * @param workspaceId - Optional workspace ID to filter connectors
  */
-export const useSearchSourceConnectors = (lazy: boolean = false, searchSpaceId?: number) => {
+export const useSearchSourceConnectors = (lazy: boolean = false, workspaceId?: number) => {
 	const [connectors, setConnectors] = useState<SearchSourceConnector[]>([]);
 	const [isLoading, setIsLoading] = useState(!lazy); // Don't show loading initially for lazy mode
 	const [isLoaded, setIsLoaded] = useState(false); // Memoization flag
@@ -60,69 +60,7 @@ export const useSearchSourceConnectors = (lazy: boolean = false, searchSpaceId?:
 		},
 	]);
 
-	const fetchConnectors = useCallback(
-		async (spaceId?: number) => {
-			if (isLoaded && lazy) return; // Avoid redundant calls in lazy mode
-
-			try {
-				setIsLoading(true);
-				setError(null);
-
-				// Build URL with optional search_space_id query parameter
-				const url = new URL(
-					`${process.env.NEXT_PUBLIC_FASTAPI_BACKEND_URL}/api/v1/search-source-connectors`
-				);
-				if (spaceId !== undefined) {
-					url.searchParams.append("search_space_id", spaceId.toString());
-				}
-
-				const response = await authenticatedFetch(url.toString(), {
-					method: "GET",
-					headers: { "Content-Type": "application/json" },
-				});
-
-				if (!response.ok) {
-					throw new Error(`Failed to fetch connectors: ${response.statusText}`);
-				}
-
-				const data = await response.json();
-				setConnectors(data);
-				setIsLoaded(true);
-
-				// Update connector source items when connectors change
-				updateConnectorSourceItems(data);
-
-				return data;
-			} catch (err) {
-				setError(err instanceof Error ? err : new Error("An unknown error occurred"));
-				console.error("Error fetching search source connectors:", err);
-			} finally {
-				setIsLoading(false);
-			}
-		},
-		[isLoaded, lazy]
-	);
-
-	useEffect(() => {
-		// Only auto-fetch if lazy is false AND searchSpaceId is provided
-		// This prevents 400 errors when the hook is used without a searchSpaceId
-		if (!lazy && searchSpaceId !== undefined) {
-			fetchConnectors(searchSpaceId);
-		}
-	}, [lazy, fetchConnectors, searchSpaceId]);
-
-	// Function to refresh the connectors list
-	const refreshConnectors = useCallback(
-		async (spaceId?: number) => {
-			setIsLoaded(false); // Reset memoization flag to allow refetch
-			await fetchConnectors(spaceId !== undefined ? spaceId : searchSpaceId);
-		},
-		[fetchConnectors, searchSpaceId]
-	);
-
-	// Update connector source items when connectors change
-	const updateConnectorSourceItems = (currentConnectors: SearchSourceConnector[]) => {
-		// Start with the default hardcoded connectors
+	const updateConnectorSourceItems = useCallback((currentConnectors: SearchSourceConnector[]) => {
 		const defaultConnectors: ConnectorSourceItem[] = [
 			{
 				id: 1,
@@ -150,47 +88,104 @@ export const useSearchSourceConnectors = (lazy: boolean = false, searchSpaceId?:
 			},
 		];
 
-		// Add the API connectors
 		const apiConnectors: ConnectorSourceItem[] = currentConnectors.map((connector, index) => ({
-			id: 1000 + index, // Use a high ID to avoid conflicts with hardcoded IDs
+			id: 1000 + index,
 			name: connector.name,
 			type: connector.connector_type,
 			sources: [],
 		}));
 
 		setConnectorSourceItems([...defaultConnectors, ...apiConnectors]);
-	};
+	}, []);
+
+	const fetchConnectors = useCallback(
+		async (spaceId?: number) => {
+			if (isLoaded && lazy) return; // Avoid redundant calls in lazy mode
+
+			try {
+				setIsLoading(true);
+				setError(null);
+
+				const response = await authenticatedFetch(
+					buildBackendUrl("/api/v1/search-source-connectors", {
+						workspace_id: spaceId,
+					}),
+					{
+						method: "GET",
+						headers: { "Content-Type": "application/json" },
+					}
+				);
+
+				if (!response.ok) {
+					throw new Error(`Failed to fetch connectors: ${response.statusText}`);
+				}
+
+				const data = await response.json();
+				setConnectors(data);
+				setIsLoaded(true);
+
+				// Update connector source items when connectors change
+				updateConnectorSourceItems(data);
+
+				return data;
+			} catch (err) {
+				setError(err instanceof Error ? err : new Error("An unknown error occurred"));
+				console.error("Error fetching search source connectors:", err);
+			} finally {
+				setIsLoading(false);
+			}
+		},
+		[isLoaded, lazy, updateConnectorSourceItems]
+	);
+
+	useEffect(() => {
+		// Only auto-fetch if lazy is false AND workspaceId is provided
+		// This prevents 400 errors when the hook is used without a workspaceId
+		if (!lazy && workspaceId !== undefined) {
+			fetchConnectors(workspaceId);
+		}
+	}, [lazy, fetchConnectors, workspaceId]);
+
+	// Function to refresh the connectors list
+	const refreshConnectors = useCallback(
+		async (spaceId?: number) => {
+			setIsLoaded(false); // Reset memoization flag to allow refetch
+			await fetchConnectors(spaceId !== undefined ? spaceId : workspaceId);
+		},
+		[fetchConnectors, workspaceId]
+	);
 
 	/**
 	 * Create a new search source connector
-	 * @param connectorData - The connector data (excluding search_space_id)
-	 * @param spaceId - The search space ID to associate the connector with
+	 * @param connectorData - The connector data (excluding workspace_id)
+	 * @param spaceId - The workspace ID to associate the connector with
 	 */
 	const createConnector = async (
-		connectorData: Omit<SearchSourceConnector, "id" | "user_id" | "created_at" | "search_space_id">,
+		connectorData: Omit<SearchSourceConnector, "id" | "user_id" | "created_at" | "workspace_id">,
 		spaceId: number
 	) => {
 		try {
-			// Add search_space_id as a query parameter
-			const url = new URL(
-				`${process.env.NEXT_PUBLIC_FASTAPI_BACKEND_URL}/api/v1/search-source-connectors`
+			const response = await authenticatedFetch(
+				buildBackendUrl("/api/v1/search-source-connectors", {
+					workspace_id: spaceId,
+				}),
+				{
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify(connectorData),
+				}
 			);
-			url.searchParams.append("search_space_id", spaceId.toString());
-
-			const response = await authenticatedFetch(url.toString(), {
-				method: "POST",
-				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify(connectorData),
-			});
 
 			if (!response.ok) {
 				throw new Error(`Failed to create connector: ${response.statusText}`);
 			}
 
 			const newConnector = await response.json();
-			const updatedConnectors = [...connectors, newConnector];
-			setConnectors(updatedConnectors);
-			updateConnectorSourceItems(updatedConnectors);
+			setConnectors((prev) => {
+				const updated = [...prev, newConnector];
+				updateConnectorSourceItems(updated);
+				return updated;
+			});
 			return newConnector;
 		} catch (err) {
 			console.error("Error creating search source connector:", err);
@@ -204,12 +199,12 @@ export const useSearchSourceConnectors = (lazy: boolean = false, searchSpaceId?:
 	const updateConnector = async (
 		connectorId: number,
 		connectorData: Partial<
-			Omit<SearchSourceConnector, "id" | "user_id" | "created_at" | "search_space_id">
+			Omit<SearchSourceConnector, "id" | "user_id" | "created_at" | "workspace_id">
 		>
 	) => {
 		try {
 			const response = await authenticatedFetch(
-				`${process.env.NEXT_PUBLIC_FASTAPI_BACKEND_URL}/api/v1/search-source-connectors/${connectorId}`,
+				buildBackendUrl(`/api/v1/search-source-connectors/${connectorId}`),
 				{
 					method: "PUT",
 					headers: { "Content-Type": "application/json" },
@@ -222,11 +217,11 @@ export const useSearchSourceConnectors = (lazy: boolean = false, searchSpaceId?:
 			}
 
 			const updatedConnector = await response.json();
-			const updatedConnectors = connectors.map((connector) =>
-				connector.id === connectorId ? updatedConnector : connector
-			);
-			setConnectors(updatedConnectors);
-			updateConnectorSourceItems(updatedConnectors);
+			setConnectors((prev) => {
+				const updated = prev.map((c) => (c.id === connectorId ? updatedConnector : c));
+				updateConnectorSourceItems(updated);
+				return updated;
+			});
 			return updatedConnector;
 		} catch (err) {
 			console.error("Error updating search source connector:", err);
@@ -240,7 +235,7 @@ export const useSearchSourceConnectors = (lazy: boolean = false, searchSpaceId?:
 	const deleteConnector = async (connectorId: number) => {
 		try {
 			const response = await authenticatedFetch(
-				`${process.env.NEXT_PUBLIC_FASTAPI_BACKEND_URL}/api/v1/search-source-connectors/${connectorId}`,
+				buildBackendUrl(`/api/v1/search-source-connectors/${connectorId}`),
 				{
 					method: "DELETE",
 					headers: { "Content-Type": "application/json" },
@@ -251,9 +246,11 @@ export const useSearchSourceConnectors = (lazy: boolean = false, searchSpaceId?:
 				throw new Error(`Failed to delete connector: ${response.statusText}`);
 			}
 
-			const updatedConnectors = connectors.filter((connector) => connector.id !== connectorId);
-			setConnectors(updatedConnectors);
-			updateConnectorSourceItems(updatedConnectors);
+			setConnectors((prev) => {
+				const updated = prev.filter((c) => c.id !== connectorId);
+				updateConnectorSourceItems(updated);
+				return updated;
+			});
 		} catch (err) {
 			console.error("Error deleting search source connector:", err);
 			throw err;
@@ -261,30 +258,21 @@ export const useSearchSourceConnectors = (lazy: boolean = false, searchSpaceId?:
 	};
 
 	/**
-	 * Index content from a connector to a search space
+	 * Index content from a connector to a workspace
 	 */
 	const indexConnector = async (
 		connectorId: number,
-		searchSpaceId: string | number,
+		workspaceId: string | number,
 		startDate?: string,
 		endDate?: string
 	) => {
 		try {
-			// Build query parameters
-			const params = new URLSearchParams({
-				search_space_id: searchSpaceId.toString(),
-			});
-			if (startDate) {
-				params.append("start_date", startDate);
-			}
-			if (endDate) {
-				params.append("end_date", endDate);
-			}
-
 			const response = await authenticatedFetch(
-				`${
-					process.env.NEXT_PUBLIC_FASTAPI_BACKEND_URL
-				}/api/v1/search-source-connectors/${connectorId}/index?${params.toString()}`,
+				buildBackendUrl(`/api/v1/search-source-connectors/${connectorId}/index`, {
+					workspace_id: workspaceId,
+					start_date: startDate,
+					end_date: endDate,
+				}),
 				{
 					method: "POST",
 					headers: { "Content-Type": "application/json" },
@@ -298,15 +286,11 @@ export const useSearchSourceConnectors = (lazy: boolean = false, searchSpaceId?:
 			const result = await response.json();
 
 			// Update the connector's last_indexed_at timestamp
-			const updatedConnectors = connectors.map((connector) =>
-				connector.id === connectorId
-					? {
-							...connector,
-							last_indexed_at: new Date().toISOString(),
-						}
-					: connector
+			setConnectors((prev) =>
+				prev.map((c) =>
+					c.id === connectorId ? { ...c, last_indexed_at: new Date().toISOString() } : c
+				)
 			);
-			setConnectors(updatedConnectors);
 
 			return result;
 		} catch (err) {

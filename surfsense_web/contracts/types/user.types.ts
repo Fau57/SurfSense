@@ -1,13 +1,14 @@
 import { z } from "zod";
 
 export const user = z.object({
-	id: z.string().uuid(),
-	email: z.string().email(),
+	id: z.uuid(),
+	email: z.email(),
 	is_active: z.boolean(),
 	is_superuser: z.boolean(),
 	is_verified: z.boolean(),
-	pages_limit: z.number(),
-	pages_used: z.number(),
+	credit_micros_balance: z.number(),
+	display_name: z.string().nullish(),
+	avatar_url: z.string().nullish(),
 });
 
 /**
@@ -15,5 +16,20 @@ export const user = z.object({
  */
 export const getMeResponse = user;
 
+/**
+ * Update current user request
+ */
+export const updateUserRequest = z.object({
+	display_name: z.string().nullish(),
+	avatar_url: z.string().nullish(),
+});
+
+/**
+ * Update current user response
+ */
+export const updateUserResponse = user;
+
 export type User = z.infer<typeof user>;
 export type GetMeResponse = z.infer<typeof getMeResponse>;
+export type UpdateUserRequest = z.infer<typeof updateUserRequest>;
+export type UpdateUserResponse = z.infer<typeof updateUserResponse>;

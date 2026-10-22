@@ -1,6 +1,6 @@
 # syntax=docker.io/docker/dockerfile:1
 
-FROM node:20-alpine AS base
+FROM node:24-alpine AS base
 
 # Install dependencies only when needed
 FROM base AS deps
@@ -12,7 +12,7 @@ WORKDIR /app
 RUN corepack enable pnpm
 
 # Copy package files
-COPY package.json pnpm-lock.yaml* .npmrc* ./
+COPY package.json pnpm-lock.yaml* pnpm-workspace.yaml* .npmrc* ./
 
 # First copy the config file and content to avoid fumadocs-mdx postinstall error
 COPY source.config.ts ./
@@ -26,18 +26,14 @@ RUN pnpm i --frozen-lockfile
 FROM base AS builder
 WORKDIR /app
 
+# git is required by the fumadocs-mdx lastModified plugin during `next build`.
+# The .git directory is dockerignored, so git commands exit non-zero and the
+# plugin falls back gracefully — but the binary itself must exist to avoid
+# "spawn git ENOENT" failures.
+RUN apk add --no-cache git
+
 # Enable pnpm
 RUN corepack enable pnpm
-
-# Accept build arguments for Next.js public env vars
-ARG NEXT_PUBLIC_FASTAPI_BACKEND_URL
-ARG NEXT_PUBLIC_FASTAPI_BACKEND_AUTH_TYPE
-ARG NEXT_PUBLIC_ETL_SERVICE
-
-# Set them as environment variables for the build
-ENV NEXT_PUBLIC_FASTAPI_BACKEND_URL=$NEXT_PUBLIC_FASTAPI_BACKEND_URL
-ENV NEXT_PUBLIC_FASTAPI_BACKEND_AUTH_TYPE=$NEXT_PUBLIC_FASTAPI_BACKEND_AUTH_TYPE
-ENV NEXT_PUBLIC_ETL_SERVICE=$NEXT_PUBLIC_ETL_SERVICE
 
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
@@ -48,6 +44,17 @@ COPY . .
 # ENV NEXT_TELEMETRY_DISABLED=1
 
 RUN pnpm run build
+
+# Dev image: source is bind-mounted and `next dev` compiles it on demand, so
+# edits need no rebuild. Branches off `deps` because node_modules must stay the
+# musl build from this image — the compose file masks the bind mount with an
+# anonymous volume so the host's glibc modules can never leak in.
+# Declared before `runner` so `runner` remains the last (default) build target.
+FROM deps AS dev
+EXPOSE 3000
+# Reconcile the persistent node_modules volume with the bind-mounted lockfile
+# before startup. This is a no-op when dependencies have not changed.
+CMD ["sh", "-c", "CI=true pnpm install --frozen-lockfile && exec pnpm run dev"]
 
 # Production image, copy all the files and run next
 FROM base AS runner
@@ -64,7 +71,7 @@ COPY --from=builder /app/public ./public
 
 # Automatically leverage output traces to reduce image size
 # https://nextjs.org/docs/advanced-features/output-file-tracing
-COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
+COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone/app/ ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 
 USER nextjs
@@ -76,4 +83,4 @@ ENV PORT=3000
 # server.js is created by next build from the standalone output
 # https://nextjs.org/docs/pages/api-reference/config/next-config-js/output
 ENV HOSTNAME="0.0.0.0"
-CMD ["node", "server.js"] 
+CMD ["node", "server.js"]

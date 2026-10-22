@@ -1,31 +1,33 @@
 import asyncio
+import time
 from datetime import datetime
+from threading import Lock
 from typing import Any
-from urllib.parse import urljoin
 
-import httpx
-from linkup import LinkupClient
 from sqlalchemy import func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
-from tavily import TavilyClient
 
+from app.config import config
 from app.db import (
+    NATIVE_TO_LEGACY_DOCTYPE,
     Chunk,
     Document,
     SearchSourceConnector,
     SearchSourceConnectorType,
+    async_session_maker,
 )
 from app.retriever.chunks_hybrid_search import ChucksHybridSearchRetriever
 from app.retriever.documents_hybrid_search import DocumentHybridSearchRetriever
+from app.utils.perf import get_perf_logger
 
 
 class ConnectorService:
-    def __init__(self, session: AsyncSession, search_space_id: int | None = None):
+    def __init__(self, session: AsyncSession, workspace_id: int | None = None):
         self.session = session
         self.chunk_retriever = ChucksHybridSearchRetriever(session)
         self.document_retriever = DocumentHybridSearchRetriever(session)
-        self.search_space_id = search_space_id
+        self.workspace_id = workspace_id
         self.source_id_counter = (
             100000  # High starting value to avoid collisions with existing IDs
         )
@@ -35,122 +37,32 @@ class ConnectorService:
 
     async def initialize_counter(self):
         """
-        Initialize the source_id_counter based on the total number of chunks for the search space.
+        Initialize the source_id_counter based on the total number of chunks for the workspace.
         This ensures unique IDs across different sessions.
         """
-        if self.search_space_id:
+        if self.workspace_id:
             try:
-                # Count total chunks for documents belonging to this search space
+                # Count total chunks for documents belonging to this workspace
 
                 result = await self.session.execute(
                     select(func.count(Chunk.id))
                     .join(Document)
-                    .filter(Document.search_space_id == self.search_space_id)
+                    .filter(Document.workspace_id == self.workspace_id)
                 )
                 chunk_count = result.scalar() or 0
                 self.source_id_counter = chunk_count + 1
                 print(
-                    f"Initialized source_id_counter to {self.source_id_counter} for search space {self.search_space_id}"
+                    f"Initialized source_id_counter to {self.source_id_counter} for workspace {self.workspace_id}"
                 )
             except Exception as e:
                 print(f"Error initializing source_id_counter: {e!s}")
                 # Fallback to default value
                 self.source_id_counter = 1
 
-    async def search_crawled_urls(
-        self,
-        user_query: str,
-        search_space_id: int,
-        top_k: int = 20,
-        start_date: datetime | None = None,
-        end_date: datetime | None = None,
-    ) -> tuple:
-        """
-        Search for crawled URLs and return both the source information and langchain documents.
-
-        Uses combined chunk-level and document-level hybrid search with RRF fusion.
-
-        Args:
-            user_query: The user's query
-            search_space_id: The search space ID to search in
-            top_k: Maximum number of results to return
-            start_date: Optional start date for filtering documents by updated_at
-            end_date: Optional end date for filtering documents by updated_at
-
-        Returns:
-            tuple: (sources_info, langchain_documents)
-        """
-        crawled_urls_docs = await self._combined_rrf_search(
-            query_text=user_query,
-            search_space_id=search_space_id,
-            document_type="CRAWLED_URL",
-            top_k=top_k,
-            start_date=start_date,
-            end_date=end_date,
-        )
-
-        # Early return if no results
-        if not crawled_urls_docs:
-            return {
-                "id": 1,
-                "name": "Crawled URLs",
-                "type": "CRAWLED_URL",
-                "sources": [],
-            }, []
-
-        def _title_fn(doc_info: dict[str, Any], metadata: dict[str, Any]) -> str:
-            return doc_info.get("title") or metadata.get("title") or "Untitled Document"
-
-        def _url_fn(_doc_info: dict[str, Any], metadata: dict[str, Any]) -> str:
-            return metadata.get("source") or metadata.get("url") or ""
-
-        def _description_fn(
-            chunk: dict[str, Any], _doc_info: dict[str, Any], metadata: dict[str, Any]
-        ) -> str:
-            description = metadata.get("description") or self._chunk_preview(
-                chunk.get("content", "")
-            )
-            info_parts = []
-            language = metadata.get("language", "")
-            last_crawled_at = metadata.get("last_crawled_at", "")
-            if language:
-                info_parts.append(f"Language: {language}")
-            if last_crawled_at:
-                info_parts.append(f"Last crawled: {last_crawled_at}")
-            if info_parts:
-                description = (description + " | " + " | ".join(info_parts)).strip(" |")
-            return description
-
-        def _extra_fields_fn(
-            _chunk: dict[str, Any], _doc_info: dict[str, Any], metadata: dict[str, Any]
-        ) -> dict[str, Any]:
-            return {
-                "language": metadata.get("language", ""),
-                "last_crawled_at": metadata.get("last_crawled_at", ""),
-            }
-
-        sources_list = self._build_chunk_sources_from_documents(
-            crawled_urls_docs,
-            title_fn=_title_fn,
-            description_fn=_description_fn,
-            url_fn=_url_fn,
-            extra_fields_fn=_extra_fields_fn,
-        )
-
-        # Create result object
-        result_object = {
-            "id": 1,
-            "name": "Crawled URLs",
-            "type": "CRAWLED_URL",
-            "sources": sources_list,
-        }
-
-        return result_object, crawled_urls_docs
-
     async def search_files(
         self,
         user_query: str,
-        search_space_id: int,
+        workspace_id: int,
         top_k: int = 20,
         start_date: datetime | None = None,
         end_date: datetime | None = None,
@@ -162,7 +74,7 @@ class ConnectorService:
 
         Args:
             user_query: The user's query
-            search_space_id: The search space ID to search in
+            workspace_id: The workspace ID to search in
             top_k: Maximum number of results to return
             start_date: Optional start date for filtering documents by updated_at
             end_date: Optional end date for filtering documents by updated_at
@@ -172,7 +84,7 @@ class ConnectorService:
         """
         files_docs = await self._combined_rrf_search(
             query_text=user_query,
-            search_space_id=search_space_id,
+            workspace_id=workspace_id,
             document_type="FILE",
             top_k=top_k,
             start_date=start_date,
@@ -216,11 +128,12 @@ class ConnectorService:
     async def _combined_rrf_search(
         self,
         query_text: str,
-        search_space_id: int,
-        document_type: str,
+        workspace_id: int,
+        document_type: str | list[str],
         top_k: int = 20,
         start_date: datetime | None = None,
         end_date: datetime | None = None,
+        query_embedding: list[float] | None = None,
     ) -> list[dict[str, Any]]:
         """
         Perform combined search using both chunk-based and document-based hybrid search,
@@ -237,8 +150,9 @@ class ConnectorService:
 
         Args:
             query_text: The search query text
-            search_space_id: The search space ID to search within
-            document_type: Document type to filter (e.g., "FILE", "CRAWLED_URL")
+            workspace_id: The workspace ID to search within
+            document_type: Document type(s) to filter (e.g., "FILE", "CRAWLED_URL",
+                           or a list for multi-type queries)
             top_k: Number of results to return
             start_date: Optional start date for filtering documents by updated_at
             end_date: Optional end date for filtering documents by updated_at
@@ -246,35 +160,76 @@ class ConnectorService:
         Returns:
             List of combined and deduplicated document results
         """
+        from app.config import config
+
+        perf = get_perf_logger()
+        t0 = time.perf_counter()
+
+        # Expand native Google types to include legacy Composio equivalents
+        # so old documents remain searchable until re-indexed.
+        if isinstance(document_type, str) and document_type in NATIVE_TO_LEGACY_DOCTYPE:
+            resolved_type: str | list[str] = [
+                document_type,
+                NATIVE_TO_LEGACY_DOCTYPE[document_type],
+            ]
+        else:
+            resolved_type = document_type
+
         # RRF constant
         k = 60
 
         # Get more results from each retriever for better fusion
         retriever_top_k = top_k * 2
 
-        # IMPORTANT:
-        # These retrievers share the same AsyncSession. AsyncSession does not permit
-        # concurrent awaits that require DB IO on the same session/connection.
-        # Running these in parallel can raise:
-        # "This session is provisioning a new connection; concurrent operations are not permitted"
-        #
-        # So we run them sequentially.
-        chunk_results = await self.chunk_retriever.hybrid_search(
-            query_text=query_text,
-            top_k=retriever_top_k,
-            search_space_id=search_space_id,
-            document_type=document_type,
-            start_date=start_date,
-            end_date=end_date,
+        # Reuse caller-provided embedding or compute once for both retrievers.
+        if query_embedding is None:
+            t_embed = time.perf_counter()
+            query_embedding = await asyncio.to_thread(
+                config.embedding_model_instance.embed, query_text
+            )
+            perf.info(
+                "[connector_svc] _combined_rrf embedding in %.3fs type=%s",
+                time.perf_counter() - t_embed,
+                document_type,
+            )
+
+        search_kwargs = {
+            "query_text": query_text,
+            "top_k": retriever_top_k,
+            "workspace_id": workspace_id,
+            "document_type": resolved_type,
+            "start_date": start_date,
+            "end_date": end_date,
+            "query_embedding": query_embedding,
+        }
+
+        # Run chunk and document retrievers in parallel using separate DB sessions
+        # so they don't contend on a shared AsyncSession connection.
+        async def _run_chunk_search() -> list[dict[str, Any]]:
+            async with async_session_maker() as session:
+                retriever = ChucksHybridSearchRetriever(session)
+                return await retriever.hybrid_search(**search_kwargs)
+
+        async def _run_doc_search() -> list[dict[str, Any]]:
+            async with async_session_maker() as session:
+                retriever = DocumentHybridSearchRetriever(session)
+                return await retriever.hybrid_search(**search_kwargs)
+
+        t_parallel = time.perf_counter()
+        chunk_results, doc_results = await asyncio.gather(
+            _run_chunk_search(), _run_doc_search()
         )
-        doc_results = await self.document_retriever.hybrid_search(
-            query_text=query_text,
-            top_k=retriever_top_k,
-            search_space_id=search_space_id,
-            document_type=document_type,
-            start_date=start_date,
-            end_date=end_date,
+        perf.info(
+            "[connector_svc] _combined_rrf parallel retrievers in %.3fs "
+            "chunk_results=%d doc_results=%d type=%s",
+            time.perf_counter() - t_parallel,
+            len(chunk_results),
+            len(doc_results),
+            document_type,
         )
+
+        if not chunk_results and not doc_results:
+            return []
 
         # Helper to extract document_id from our doc-grouped result
         def _doc_id(item: dict[str, Any]) -> int | None:
@@ -335,6 +290,13 @@ class ConnectorService:
                     result["chunks"] = doc_data[did]["chunks"]
                 combined_results.append(result)
 
+        perf.info(
+            "[connector_svc] _combined_rrf_search TOTAL in %.3fs results=%d type=%s space=%d",
+            time.perf_counter() - t0,
+            len(combined_results),
+            document_type,
+            workspace_id,
+        )
         return combined_results
 
     def _get_doc_url(self, metadata: dict[str, Any]) -> str:
@@ -403,545 +365,30 @@ class ConnectorService:
     async def get_connector_by_type(
         self,
         connector_type: SearchSourceConnectorType,
-        search_space_id: int,
+        workspace_id: int,
     ) -> SearchSourceConnector | None:
         """
-        Get a connector by type for a specific search space
+        Get a connector by type for a specific workspace
 
         Args:
             connector_type: The connector type to retrieve
-            search_space_id: The search space ID to filter by
+            workspace_id: The workspace ID to filter by
 
         Returns:
             Optional[SearchSourceConnector]: The connector if found, None otherwise
         """
         query = select(SearchSourceConnector).filter(
-            SearchSourceConnector.search_space_id == search_space_id,
+            SearchSourceConnector.workspace_id == workspace_id,
             SearchSourceConnector.connector_type == connector_type,
         )
 
         result = await self.session.execute(query)
         return result.scalars().first()
 
-    async def search_tavily(
-        self, user_query: str, search_space_id: int, top_k: int = 20
-    ) -> tuple:
-        """
-        Search using Tavily API and return both the source information and documents
-
-        Args:
-            user_query: The user's query
-            search_space_id: The search space ID
-            top_k: Maximum number of results to return
-
-        Returns:
-            tuple: (sources_info, documents)
-        """
-        # Get Tavily connector configuration
-        tavily_connector = await self.get_connector_by_type(
-            SearchSourceConnectorType.TAVILY_API, search_space_id
-        )
-
-        if not tavily_connector:
-            # Return empty results if no Tavily connector is configured
-            return {
-                "id": 3,
-                "name": "Tavily Search",
-                "type": "TAVILY_API",
-                "sources": [],
-            }, []
-
-        # Initialize Tavily client with API key from connector config
-        tavily_api_key = tavily_connector.config.get("TAVILY_API_KEY")
-        tavily_client = TavilyClient(api_key=tavily_api_key)
-
-        # Perform search with Tavily
-        try:
-            response = tavily_client.search(
-                query=user_query,
-                max_results=top_k,
-                search_depth="advanced",  # Use advanced search for better results
-            )
-
-            # Extract results from Tavily response
-            tavily_results = response.get("results", [])
-
-            # Early return if no results
-            if not tavily_results:
-                return {
-                    "id": 3,
-                    "name": "Tavily Search",
-                    "type": "TAVILY_API",
-                    "sources": [],
-                }, []
-
-            # Process each result and create sources directly without deduplication
-            sources_list = []
-            documents = []
-
-            async with self.counter_lock:
-                for _i, result in enumerate(tavily_results):
-                    # Create a source entry
-                    source = {
-                        "id": self.source_id_counter,
-                        "title": result.get("title", "Tavily Result"),
-                        "description": result.get("content", ""),
-                        "url": result.get("url", ""),
-                    }
-                    sources_list.append(source)
-
-                    # Create a document entry
-                    document = {
-                        "chunk_id": self.source_id_counter,
-                        "content": result.get("content", ""),
-                        "score": result.get("score", 0.0),
-                        "document": {
-                            "id": self.source_id_counter,
-                            "title": result.get("title", "Tavily Result"),
-                            "document_type": "TAVILY_API",
-                            "metadata": {
-                                "url": result.get("url", ""),
-                                "published_date": result.get("published_date", ""),
-                                "source": "TAVILY_API",
-                            },
-                        },
-                    }
-                    documents.append(document)
-                    self.source_id_counter += 1
-
-            # Create result object
-            result_object = {
-                "id": 3,
-                "name": "Tavily Search",
-                "type": "TAVILY_API",
-                "sources": sources_list,
-            }
-
-            return result_object, documents
-
-        except Exception as e:
-            # Log the error and return empty results
-            print(f"Error searching with Tavily: {e!s}")
-            return {
-                "id": 3,
-                "name": "Tavily Search",
-                "type": "TAVILY_API",
-                "sources": [],
-            }, []
-
-    async def search_searxng(
-        self,
-        user_query: str,
-        search_space_id: int,
-        top_k: int = 20,
-    ) -> tuple:
-        """
-        Search using a configured SearxNG instance and return both sources and documents.
-        """
-        searx_connector = await self.get_connector_by_type(
-            SearchSourceConnectorType.SEARXNG_API, search_space_id
-        )
-
-        if not searx_connector:
-            return {
-                "id": 11,
-                "name": "SearxNG Search",
-                "type": "SEARXNG_API",
-                "sources": [],
-            }, []
-
-        config = searx_connector.config or {}
-        host = config.get("SEARXNG_HOST")
-
-        if not host:
-            print("SearxNG connector is missing SEARXNG_HOST configuration")
-            return {
-                "id": 11,
-                "name": "SearxNG Search",
-                "type": "SEARXNG_API",
-                "sources": [],
-            }, []
-
-        api_key = config.get("SEARXNG_API_KEY")
-        engines = config.get("SEARXNG_ENGINES")
-        categories = config.get("SEARXNG_CATEGORIES")
-        language = config.get("SEARXNG_LANGUAGE")
-        safesearch = config.get("SEARXNG_SAFESEARCH")
-
-        def _parse_bool(value: Any, default: bool = True) -> bool:
-            if isinstance(value, bool):
-                return value
-            if isinstance(value, str):
-                lowered = value.strip().lower()
-                if lowered in {"true", "1", "yes", "on"}:
-                    return True
-                if lowered in {"false", "0", "no", "off"}:
-                    return False
-            return default
-
-        verify_ssl = _parse_bool(config.get("SEARXNG_VERIFY_SSL", True))
-
-        safesearch_value: int | None = None
-        if isinstance(safesearch, str):
-            safesearch_clean = safesearch.strip()
-            if safesearch_clean.isdigit():
-                safesearch_value = int(safesearch_clean)
-        elif isinstance(safesearch, int | float):
-            safesearch_value = int(safesearch)
-
-        if safesearch_value is not None and not (0 <= safesearch_value <= 2):
-            safesearch_value = None
-
-        def _format_list(value: Any) -> str | None:
-            if value is None:
-                return None
-            if isinstance(value, str):
-                value = value.strip()
-                return value or None
-            if isinstance(value, list | tuple | set):
-                cleaned = [str(item).strip() for item in value if str(item).strip()]
-                return ",".join(cleaned) if cleaned else None
-            return str(value)
-
-        params: dict[str, Any] = {
-            "q": user_query,
-            "format": "json",
-            "language": language or "",
-            "limit": max(1, min(top_k, 50)),
-        }
-
-        engines_param = _format_list(engines)
-        if engines_param:
-            params["engines"] = engines_param
-
-        categories_param = _format_list(categories)
-        if categories_param:
-            params["categories"] = categories_param
-
-        if safesearch_value is not None:
-            params["safesearch"] = safesearch_value
-
-        if not params.get("language"):
-            params.pop("language")
-
-        headers = {"Accept": "application/json"}
-        if api_key:
-            headers["X-API-KEY"] = api_key
-
-        searx_endpoint = urljoin(host if host.endswith("/") else f"{host}/", "search")
-
-        try:
-            async with httpx.AsyncClient(timeout=20.0, verify=verify_ssl) as client:
-                response = await client.get(
-                    searx_endpoint,
-                    params=params,
-                    headers=headers,
-                )
-                response.raise_for_status()
-        except httpx.HTTPError as exc:
-            print(f"Error searching with SearxNG: {exc!s}")
-            return {
-                "id": 11,
-                "name": "SearxNG Search",
-                "type": "SEARXNG_API",
-                "sources": [],
-            }, []
-
-        try:
-            data = response.json()
-        except ValueError:
-            print("Failed to decode JSON response from SearxNG")
-            return {
-                "id": 11,
-                "name": "SearxNG Search",
-                "type": "SEARXNG_API",
-                "sources": [],
-            }, []
-
-        searx_results = data.get("results", [])
-        if not searx_results:
-            return {
-                "id": 11,
-                "name": "SearxNG Search",
-                "type": "SEARXNG_API",
-                "sources": [],
-            }, []
-
-        sources_list: list[dict[str, Any]] = []
-        documents: list[dict[str, Any]] = []
-
-        async with self.counter_lock:
-            for result in searx_results:
-                description = result.get("content") or result.get("snippet") or ""
-                if len(description) > 160:
-                    description = f"{description}"
-
-                source = {
-                    "id": self.source_id_counter,
-                    "title": result.get("title", "SearxNG Result"),
-                    "description": description,
-                    "url": result.get("url", ""),
-                }
-                sources_list.append(source)
-
-                metadata = {
-                    "url": result.get("url", ""),
-                    "engines": result.get("engines", []),
-                    "category": result.get("category"),
-                    "source": "SEARXNG_API",
-                }
-
-                document = {
-                    "chunk_id": self.source_id_counter,
-                    "content": description or result.get("content", ""),
-                    "score": result.get("score", 0.0),
-                    "document": {
-                        "id": self.source_id_counter,
-                        "title": result.get("title", "SearxNG Result"),
-                        "document_type": "SEARXNG_API",
-                        "metadata": metadata,
-                    },
-                }
-                documents.append(document)
-                self.source_id_counter += 1
-
-        result_object = {
-            "id": 11,
-            "name": "SearxNG Search",
-            "type": "SEARXNG_API",
-            "sources": sources_list,
-        }
-
-        return result_object, documents
-
-    async def search_baidu(
-        self,
-        user_query: str,
-        search_space_id: int,
-        top_k: int = 20,
-    ) -> tuple:
-        """
-        Search using Baidu AI Search API and return both sources and documents.
-
-        Baidu AI Search provides intelligent search with automatic summarization.
-        We extract the raw search results (references) from the API response.
-
-        Args:
-            user_query: User's search query
-            search_space_id: Search space ID
-            top_k: Maximum number of results to return
-
-        Returns:
-            tuple: (sources_info_dict, documents_list)
-        """
-        # Get Baidu connector configuration
-        baidu_connector = await self.get_connector_by_type(
-            SearchSourceConnectorType.BAIDU_SEARCH_API, search_space_id
-        )
-
-        if not baidu_connector:
-            return {
-                "id": 12,
-                "name": "Baidu Search",
-                "type": "BAIDU_SEARCH_API",
-                "sources": [],
-            }, []
-
-        config = baidu_connector.config or {}
-        api_key = config.get("BAIDU_API_KEY")
-
-        if not api_key:
-            print("ERROR: Baidu connector is missing BAIDU_API_KEY configuration")
-            print(f"Connector config: {config}")
-            return {
-                "id": 12,
-                "name": "Baidu Search",
-                "type": "BAIDU_SEARCH_API",
-                "sources": [],
-            }, []
-
-        # Optional configuration parameters
-        model = config.get("BAIDU_MODEL", "ernie-3.5-8k")
-        search_source = config.get("BAIDU_SEARCH_SOURCE", "baidu_search_v2")
-        enable_deep_search = config.get("BAIDU_ENABLE_DEEP_SEARCH", False)
-
-        # Baidu AI Search API endpoint
-        baidu_endpoint = "https://qianfan.baidubce.com/v2/ai_search/chat/completions"
-
-        # Prepare request headers
-        # Note: Baidu uses X-Appbuilder-Authorization instead of standard Authorization header
-        headers = {
-            "X-Appbuilder-Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        }
-
-        # Prepare request payload
-        # Calculate resource_type_filter top_k values
-        # Baidu v2 supports max 20 per type
-        max_per_type = min(top_k, 20)
-
-        payload = {
-            "messages": [{"role": "user", "content": user_query}],
-            "model": model,
-            "search_source": search_source,
-            "resource_type_filter": [
-                {"type": "web", "top_k": max_per_type},
-                {"type": "video", "top_k": max(1, max_per_type // 4)},  # Fewer videos
-            ],
-            "stream": False,  # Non-streaming for simpler processing
-            "enable_deep_search": enable_deep_search,
-            "enable_corner_markers": True,  # Enable reference markers
-        }
-
-        try:
-            # Baidu AI Search may take longer as it performs search + summarization
-            # Increase timeout to 90 seconds
-            async with httpx.AsyncClient(timeout=90.0) as client:
-                response = await client.post(
-                    baidu_endpoint,
-                    headers=headers,
-                    json=payload,
-                )
-                response.raise_for_status()
-        except httpx.TimeoutException as exc:
-            print(f"ERROR: Baidu API request timeout after 90s: {exc!r}")
-            print(f"Endpoint: {baidu_endpoint}")
-            return {
-                "id": 12,
-                "name": "Baidu Search",
-                "type": "BAIDU_SEARCH_API",
-                "sources": [],
-            }, []
-        except httpx.HTTPStatusError as exc:
-            print(f"ERROR: Baidu API HTTP Status Error: {exc.response.status_code}")
-            print(f"Response text: {exc.response.text[:500]}")
-            print(f"Request URL: {exc.request.url}")
-            return {
-                "id": 12,
-                "name": "Baidu Search",
-                "type": "BAIDU_SEARCH_API",
-                "sources": [],
-            }, []
-        except httpx.RequestError as exc:
-            print(f"ERROR: Baidu API Request Error: {type(exc).__name__}: {exc!r}")
-            print(f"Endpoint: {baidu_endpoint}")
-            return {
-                "id": 12,
-                "name": "Baidu Search",
-                "type": "BAIDU_SEARCH_API",
-                "sources": [],
-            }, []
-        except Exception as exc:
-            print(
-                f"ERROR: Unexpected error calling Baidu API: {type(exc).__name__}: {exc!r}"
-            )
-            print(f"Endpoint: {baidu_endpoint}")
-            print(f"Payload: {payload}")
-            return {
-                "id": 12,
-                "name": "Baidu Search",
-                "type": "BAIDU_SEARCH_API",
-                "sources": [],
-            }, []
-
-        try:
-            data = response.json()
-        except ValueError as e:
-            print(f"ERROR: Failed to decode JSON response from Baidu AI Search: {e}")
-            print(f"Response status: {response.status_code}")
-            print(f"Response text: {response.text[:500]}")  # First 500 chars
-            return {
-                "id": 12,
-                "name": "Baidu Search",
-                "type": "BAIDU_SEARCH_API",
-                "sources": [],
-            }, []
-
-        # Extract references (search results) from the response
-        baidu_references = data.get("references", [])
-
-        if "code" in data or "message" in data:
-            print(
-                f"WARNING: Baidu API returned error - Code: {data.get('code')}, Message: {data.get('message')}"
-            )
-
-        if not baidu_references:
-            print("WARNING: No references found in Baidu API response")
-            print(f"Response keys: {list(data.keys())}")
-            return {
-                "id": 12,
-                "name": "Baidu Search",
-                "type": "BAIDU_SEARCH_API",
-                "sources": [],
-            }, []
-
-        sources_list: list[dict[str, Any]] = []
-        documents: list[dict[str, Any]] = []
-
-        async with self.counter_lock:
-            for reference in baidu_references:
-                # Extract basic fields
-                title = reference.get("title", "Baidu Search Result")
-                url = reference.get("url", "")
-                content = reference.get("content", "")
-                date = reference.get("date", "")
-                ref_type = reference.get("type", "web")  # web, image, video
-
-                # Create a source entry
-                source = {
-                    "id": self.source_id_counter,
-                    "title": title,
-                    "description": content[:300]
-                    if content
-                    else "",  # Limit description length
-                    "url": url,
-                }
-                sources_list.append(source)
-
-                # Prepare metadata
-                metadata = {
-                    "url": url,
-                    "date": date,
-                    "type": ref_type,
-                    "source": "BAIDU_SEARCH_API",
-                    "web_anchor": reference.get("web_anchor", ""),
-                    "website": reference.get("website", ""),
-                }
-
-                # Add type-specific metadata
-                if ref_type == "image" and reference.get("image"):
-                    metadata["image"] = reference["image"]
-                elif ref_type == "video" and reference.get("video"):
-                    metadata["video"] = reference["video"]
-
-                # Create a document entry
-                document = {
-                    "chunk_id": self.source_id_counter,
-                    "content": content,
-                    "score": 1.0,  # Baidu doesn't provide relevance scores
-                    "document": {
-                        "id": self.source_id_counter,
-                        "title": title,
-                        "document_type": "BAIDU_SEARCH_API",
-                        "metadata": metadata,
-                    },
-                }
-                documents.append(document)
-                self.source_id_counter += 1
-
-        result_object = {
-            "id": 12,
-            "name": "Baidu Search",
-            "type": "BAIDU_SEARCH_API",
-            "sources": sources_list,
-        }
-
-        return result_object, documents
-
     async def search_slack(
         self,
         user_query: str,
-        search_space_id: int,
+        workspace_id: int,
         top_k: int = 20,
         start_date: datetime | None = None,
         end_date: datetime | None = None,
@@ -953,7 +400,7 @@ class ConnectorService:
 
         Args:
             user_query: The user's query
-            search_space_id: The search space ID to search in
+            workspace_id: The workspace ID to search in
             top_k: Maximum number of results to return
             start_date: Optional start date for filtering documents by updated_at
             end_date: Optional end date for filtering documents by updated_at
@@ -963,7 +410,7 @@ class ConnectorService:
         """
         slack_docs = await self._combined_rrf_search(
             query_text=user_query,
-            search_space_id=search_space_id,
+            workspace_id=workspace_id,
             document_type="SLACK_CONNECTOR",
             top_k=top_k,
             start_date=start_date,
@@ -982,7 +429,7 @@ class ConnectorService:
         def _title_fn(_doc_info: dict[str, Any], metadata: dict[str, Any]) -> str:
             channel_name = metadata.get("channel_name", "Unknown Channel")
             message_date = metadata.get("start_date", "")
-            title = f"Slack: {channel_name}"
+            title = channel_name
             if message_date:
                 title += f" ({message_date})"
             return title
@@ -1015,7 +462,7 @@ class ConnectorService:
     async def search_notion(
         self,
         user_query: str,
-        search_space_id: int,
+        workspace_id: int,
         top_k: int = 20,
         start_date: datetime | None = None,
         end_date: datetime | None = None,
@@ -1027,7 +474,7 @@ class ConnectorService:
 
         Args:
             user_query: The user's query
-            search_space_id: The search space ID to search in
+            workspace_id: The workspace ID to search in
             top_k: Maximum number of results to return
             start_date: Optional start date for filtering documents by updated_at
             end_date: Optional end date for filtering documents by updated_at
@@ -1037,7 +484,7 @@ class ConnectorService:
         """
         notion_docs = await self._combined_rrf_search(
             query_text=user_query,
-            search_space_id=search_space_id,
+            workspace_id=workspace_id,
             document_type="NOTION_CONNECTOR",
             top_k=top_k,
             start_date=start_date,
@@ -1056,7 +503,7 @@ class ConnectorService:
         def _title_fn(_doc_info: dict[str, Any], metadata: dict[str, Any]) -> str:
             page_title = metadata.get("page_title", "Untitled Page")
             indexed_at = metadata.get("indexed_at", "")
-            title = f"Notion: {page_title}"
+            title = page_title
             if indexed_at:
                 title += f" (indexed: {indexed_at})"
             return title
@@ -1085,7 +532,7 @@ class ConnectorService:
     async def search_extension(
         self,
         user_query: str,
-        search_space_id: int,
+        workspace_id: int,
         top_k: int = 20,
         start_date: datetime | None = None,
         end_date: datetime | None = None,
@@ -1097,7 +544,7 @@ class ConnectorService:
 
         Args:
             user_query: The user's query
-            search_space_id: The search space ID to search in
+            workspace_id: The workspace ID to search in
             top_k: Maximum number of results to return
             start_date: Optional start date for filtering documents by updated_at
             end_date: Optional end date for filtering documents by updated_at
@@ -1107,7 +554,7 @@ class ConnectorService:
         """
         extension_docs = await self._combined_rrf_search(
             query_text=user_query,
-            search_space_id=search_space_id,
+            workspace_id=workspace_id,
             document_type="EXTENSION",
             top_k=top_k,
             start_date=start_date,
@@ -1182,7 +629,7 @@ class ConnectorService:
     async def search_youtube(
         self,
         user_query: str,
-        search_space_id: int,
+        workspace_id: int,
         top_k: int = 20,
         start_date: datetime | None = None,
         end_date: datetime | None = None,
@@ -1194,7 +641,7 @@ class ConnectorService:
 
         Args:
             user_query: The user's query
-            search_space_id: The search space ID to search in
+            workspace_id: The workspace ID to search in
             top_k: Maximum number of results to return
             start_date: Optional start date for filtering documents by updated_at
             end_date: Optional end date for filtering documents by updated_at
@@ -1204,7 +651,7 @@ class ConnectorService:
         """
         youtube_docs = await self._combined_rrf_search(
             query_text=user_query,
-            search_space_id=search_space_id,
+            workspace_id=workspace_id,
             document_type="YOUTUBE_VIDEO",
             top_k=top_k,
             start_date=start_date,
@@ -1263,7 +710,7 @@ class ConnectorService:
     async def search_github(
         self,
         user_query: str,
-        search_space_id: int,
+        workspace_id: int,
         top_k: int = 20,
         start_date: datetime | None = None,
         end_date: datetime | None = None,
@@ -1275,7 +722,7 @@ class ConnectorService:
 
         Args:
             user_query: The user's query
-            search_space_id: The search space ID to search in
+            workspace_id: The workspace ID to search in
             top_k: Maximum number of results to return
             start_date: Optional start date for filtering documents by updated_at
             end_date: Optional end date for filtering documents by updated_at
@@ -1285,7 +732,7 @@ class ConnectorService:
         """
         github_docs = await self._combined_rrf_search(
             query_text=user_query,
-            search_space_id=search_space_id,
+            workspace_id=workspace_id,
             document_type="GITHUB_CONNECTOR",
             top_k=top_k,
             start_date=start_date,
@@ -1303,10 +750,9 @@ class ConnectorService:
 
         sources_list = self._build_chunk_sources_from_documents(
             github_docs,
-            description_fn=lambda chunk, _doc_info, metadata: metadata.get(
-                "description"
-            )
-            or chunk.get("content", ""),
+            description_fn=lambda chunk, _doc_info, metadata: (
+                metadata.get("description") or chunk.get("content", "")
+            ),
             url_fn=lambda _doc_info, metadata: metadata.get("url", "") or "",
         )
 
@@ -1323,7 +769,7 @@ class ConnectorService:
     async def search_linear(
         self,
         user_query: str,
-        search_space_id: int,
+        workspace_id: int,
         top_k: int = 20,
         start_date: datetime | None = None,
         end_date: datetime | None = None,
@@ -1335,7 +781,7 @@ class ConnectorService:
 
         Args:
             user_query: The user's query
-            search_space_id: The search space ID to search in
+            workspace_id: The workspace ID to search in
             top_k: Maximum number of results to return
             start_date: Optional start date for filtering documents by updated_at
             end_date: Optional end date for filtering documents by updated_at
@@ -1345,7 +791,7 @@ class ConnectorService:
         """
         linear_docs = await self._combined_rrf_search(
             query_text=user_query,
-            search_space_id=search_space_id,
+            workspace_id=workspace_id,
             document_type="LINEAR_CONNECTOR",
             top_k=top_k,
             start_date=start_date,
@@ -1366,9 +812,9 @@ class ConnectorService:
             issue_title = metadata.get("issue_title", "Untitled Issue")
             issue_state = metadata.get("state", "")
             title = (
-                f"Linear: {issue_identifier} - {issue_title}"
+                f"{issue_identifier} - {issue_title}"
                 if issue_identifier
-                else f"Linear: {issue_title}"
+                else issue_title
             )
             if issue_state:
                 title += f" ({issue_state})"
@@ -1423,7 +869,7 @@ class ConnectorService:
     async def search_jira(
         self,
         user_query: str,
-        search_space_id: int,
+        workspace_id: int,
         top_k: int = 20,
         start_date: datetime | None = None,
         end_date: datetime | None = None,
@@ -1435,7 +881,7 @@ class ConnectorService:
 
         Args:
             user_query: The user's query
-            search_space_id: The search space ID to search in
+            workspace_id: The workspace ID to search in
             top_k: Maximum number of results to return
             start_date: Optional start date for filtering documents by updated_at
             end_date: Optional end date for filtering documents by updated_at
@@ -1445,7 +891,7 @@ class ConnectorService:
         """
         jira_docs = await self._combined_rrf_search(
             query_text=user_query,
-            search_space_id=search_space_id,
+            workspace_id=workspace_id,
             document_type="JIRA_CONNECTOR",
             top_k=top_k,
             start_date=start_date,
@@ -1465,11 +911,7 @@ class ConnectorService:
             issue_key = metadata.get("issue_key", "")
             issue_title = metadata.get("issue_title", "Untitled Issue")
             status = metadata.get("status", "")
-            title = (
-                f"Jira: {issue_key} - {issue_title}"
-                if issue_key
-                else f"Jira: {issue_title}"
-            )
+            title = f"{issue_key} - {issue_title}" if issue_key else issue_title
             if status:
                 title += f" ({status})"
             return title
@@ -1529,7 +971,7 @@ class ConnectorService:
     async def search_google_calendar(
         self,
         user_query: str,
-        search_space_id: int,
+        workspace_id: int,
         top_k: int = 20,
         start_date: datetime | None = None,
         end_date: datetime | None = None,
@@ -1541,7 +983,7 @@ class ConnectorService:
 
         Args:
             user_query: The user's query
-            search_space_id: The search space ID to search in
+            workspace_id: The workspace ID to search in
             top_k: Maximum number of results to return
             start_date: Optional start date for filtering documents by updated_at
             end_date: Optional end date for filtering documents by updated_at
@@ -1551,7 +993,7 @@ class ConnectorService:
         """
         calendar_docs = await self._combined_rrf_search(
             query_text=user_query,
-            search_space_id=search_space_id,
+            workspace_id=workspace_id,
             document_type="GOOGLE_CALENDAR_CONNECTOR",
             top_k=top_k,
             start_date=start_date,
@@ -1570,7 +1012,7 @@ class ConnectorService:
         def _title_fn(_doc_info: dict[str, Any], metadata: dict[str, Any]) -> str:
             event_summary = metadata.get("event_summary", "Untitled Event")
             start_time = metadata.get("start_time", "")
-            title = f"Calendar: {event_summary}"
+            title = event_summary
             if start_time:
                 title += f" ({start_time})"
             return title
@@ -1635,7 +1077,7 @@ class ConnectorService:
     async def search_airtable(
         self,
         user_query: str,
-        search_space_id: int,
+        workspace_id: int,
         top_k: int = 20,
         start_date: datetime | None = None,
         end_date: datetime | None = None,
@@ -1647,7 +1089,7 @@ class ConnectorService:
 
         Args:
             user_query: The user's query
-            search_space_id: The search space ID to search in
+            workspace_id: The workspace ID to search in
             top_k: Maximum number of results to return
             start_date: Optional start date for filtering documents by updated_at
             end_date: Optional end date for filtering documents by updated_at
@@ -1657,7 +1099,7 @@ class ConnectorService:
         """
         airtable_docs = await self._combined_rrf_search(
             query_text=user_query,
-            search_space_id=search_space_id,
+            workspace_id=workspace_id,
             document_type="AIRTABLE_CONNECTOR",
             top_k=top_k,
             start_date=start_date,
@@ -1675,7 +1117,7 @@ class ConnectorService:
 
         def _title_fn(_doc_info: dict[str, Any], metadata: dict[str, Any]) -> str:
             record_id = metadata.get("record_id", "")
-            return f"Airtable Record: {record_id}" if record_id else "Airtable Record"
+            return record_id if record_id else "Airtable Record"
 
         def _description_fn(
             _chunk: dict[str, Any], _doc_info: dict[str, Any], metadata: dict[str, Any]
@@ -1711,7 +1153,7 @@ class ConnectorService:
     async def search_google_gmail(
         self,
         user_query: str,
-        search_space_id: int,
+        workspace_id: int,
         top_k: int = 20,
         start_date: datetime | None = None,
         end_date: datetime | None = None,
@@ -1723,7 +1165,7 @@ class ConnectorService:
 
         Args:
             user_query: The user's query
-            search_space_id: The search space ID to search in
+            workspace_id: The workspace ID to search in
             top_k: Maximum number of results to return
             start_date: Optional start date for filtering documents by updated_at
             end_date: Optional end date for filtering documents by updated_at
@@ -1733,7 +1175,7 @@ class ConnectorService:
         """
         gmail_docs = await self._combined_rrf_search(
             query_text=user_query,
-            search_space_id=search_space_id,
+            workspace_id=workspace_id,
             document_type="GOOGLE_GMAIL_CONNECTOR",
             top_k=top_k,
             start_date=start_date,
@@ -1808,10 +1250,110 @@ class ConnectorService:
 
         return result_object, gmail_docs
 
+    async def search_google_drive(
+        self,
+        user_query: str,
+        workspace_id: int,
+        top_k: int = 20,
+        start_date: datetime | None = None,
+        end_date: datetime | None = None,
+    ) -> tuple:
+        """
+        Search for Google Drive files and return both the source information and langchain documents.
+
+        Uses combined chunk-level and document-level hybrid search with RRF fusion.
+
+        Args:
+            user_query: The user's query
+            workspace_id: The workspace ID to search in
+            top_k: Maximum number of results to return
+            start_date: Optional start date for filtering documents by updated_at
+            end_date: Optional end date for filtering documents by updated_at
+
+        Returns:
+            tuple: (sources_info, langchain_documents)
+        """
+        drive_docs = await self._combined_rrf_search(
+            query_text=user_query,
+            workspace_id=workspace_id,
+            document_type="GOOGLE_DRIVE_FILE",
+            top_k=top_k,
+            start_date=start_date,
+            end_date=end_date,
+        )
+
+        # Early return if no results
+        if not drive_docs:
+            return {
+                "id": 33,
+                "name": "Google Drive Files",
+                "type": "GOOGLE_DRIVE_FILE",
+                "sources": [],
+            }, []
+
+        def _title_fn(doc_info: dict[str, Any], metadata: dict[str, Any]) -> str:
+            return (
+                doc_info.get("title")
+                or metadata.get("google_drive_file_name")
+                or metadata.get("FILE_NAME")
+                or "Untitled File"
+            )
+
+        def _url_fn(_doc_info: dict[str, Any], metadata: dict[str, Any]) -> str:
+            file_id = metadata.get("google_drive_file_id", "")
+            return f"https://drive.google.com/file/d/{file_id}/view" if file_id else ""
+
+        def _description_fn(
+            chunk: dict[str, Any], _doc_info: dict[str, Any], metadata: dict[str, Any]
+        ) -> str:
+            description = self._chunk_preview(chunk.get("content", ""))
+            info_parts = []
+            mime_type = metadata.get("google_drive_mime_type", "")
+            modified_time = metadata.get("modified_time", "")
+            if mime_type:
+                # Simplify mime type for display
+                if "google-apps" in mime_type:
+                    file_type = mime_type.split(".")[-1].title()
+                else:
+                    file_type = mime_type.split("/")[-1].upper()
+                info_parts.append(f"Type: {file_type}")
+            if modified_time:
+                info_parts.append(f"Modified: {modified_time}")
+            if info_parts:
+                description = (description + " | " + " | ".join(info_parts)).strip(" |")
+            return description
+
+        def _extra_fields_fn(
+            _chunk: dict[str, Any], _doc_info: dict[str, Any], metadata: dict[str, Any]
+        ) -> dict[str, Any]:
+            return {
+                "google_drive_file_id": metadata.get("google_drive_file_id", ""),
+                "google_drive_mime_type": metadata.get("google_drive_mime_type", ""),
+                "modified_time": metadata.get("modified_time", ""),
+            }
+
+        sources_list = self._build_chunk_sources_from_documents(
+            drive_docs,
+            title_fn=_title_fn,
+            url_fn=_url_fn,
+            description_fn=_description_fn,
+            extra_fields_fn=_extra_fields_fn,
+        )
+
+        # Create result object
+        result_object = {
+            "id": 33,  # Assign a unique ID for the Google Drive connector
+            "name": "Google Drive Files",
+            "type": "GOOGLE_DRIVE_FILE",
+            "sources": sources_list,
+        }
+
+        return result_object, drive_docs
+
     async def search_confluence(
         self,
         user_query: str,
-        search_space_id: int,
+        workspace_id: int,
         top_k: int = 20,
         start_date: datetime | None = None,
         end_date: datetime | None = None,
@@ -1823,7 +1365,7 @@ class ConnectorService:
 
         Args:
             user_query: The user's query
-            search_space_id: The search space ID to search in
+            workspace_id: The workspace ID to search in
             top_k: Maximum number of results to return
             start_date: Optional start date for filtering documents by updated_at
             end_date: Optional end date for filtering documents by updated_at
@@ -1833,7 +1375,7 @@ class ConnectorService:
         """
         confluence_docs = await self._combined_rrf_search(
             query_text=user_query,
-            search_space_id=search_space_id,
+            workspace_id=workspace_id,
             document_type="CONFLUENCE_CONNECTOR",
             top_k=top_k,
             start_date=start_date,
@@ -1852,7 +1394,7 @@ class ConnectorService:
         def _title_fn(_doc_info: dict[str, Any], metadata: dict[str, Any]) -> str:
             page_title = metadata.get("page_title", "Untitled Page")
             space_key = metadata.get("space_key", "")
-            title = f"Confluence: {page_title}"
+            title = page_title
             if space_key:
                 title += f" ({space_key})"
             return title
@@ -1882,7 +1424,7 @@ class ConnectorService:
     async def search_clickup(
         self,
         user_query: str,
-        search_space_id: int,
+        workspace_id: int,
         top_k: int = 20,
         start_date: datetime | None = None,
         end_date: datetime | None = None,
@@ -1894,7 +1436,7 @@ class ConnectorService:
 
         Args:
             user_query: The user's query
-            search_space_id: The search space ID to search in
+            workspace_id: The workspace ID to search in
             top_k: Maximum number of results to return
             start_date: Optional start date for filtering documents by updated_at
             end_date: Optional end date for filtering documents by updated_at
@@ -1904,7 +1446,7 @@ class ConnectorService:
         """
         clickup_docs = await self._combined_rrf_search(
             query_text=user_query,
-            search_space_id=search_space_id,
+            workspace_id=workspace_id,
             document_type="CLICKUP_CONNECTOR",
             top_k=top_k,
             start_date=start_date,
@@ -1973,131 +1515,10 @@ class ConnectorService:
 
         return result_object, clickup_docs
 
-    async def search_linkup(
-        self,
-        user_query: str,
-        search_space_id: int,
-        mode: str = "standard",
-    ) -> tuple:
-        """
-        Search using Linkup API and return both the source information and documents
-
-        Args:
-            user_query: The user's query
-            search_space_id: The search space ID
-            mode: Search depth mode, can be "standard" or "deep"
-
-        Returns:
-            tuple: (sources_info, documents)
-        """
-        # Get Linkup connector configuration
-        linkup_connector = await self.get_connector_by_type(
-            SearchSourceConnectorType.LINKUP_API, search_space_id
-        )
-
-        if not linkup_connector:
-            # Return empty results if no Linkup connector is configured
-            return {
-                "id": 10,
-                "name": "Linkup Search",
-                "type": "LINKUP_API",
-                "sources": [],
-            }, []
-
-        # Initialize Linkup client with API key from connector config
-        linkup_api_key = linkup_connector.config.get("LINKUP_API_KEY")
-        linkup_client = LinkupClient(api_key=linkup_api_key)
-
-        # Perform search with Linkup
-        try:
-            response = linkup_client.search(
-                query=user_query,
-                depth=mode,  # Use the provided mode ("standard" or "deep")
-                output_type="searchResults",  # Default to search results
-            )
-
-            # Extract results from Linkup response - access as attribute instead of using .get()
-            linkup_results = response.results if hasattr(response, "results") else []
-
-            # Only proceed if we have results
-            if not linkup_results:
-                return {
-                    "id": 10,
-                    "name": "Linkup Search",
-                    "type": "LINKUP_API",
-                    "sources": [],
-                }, []
-
-            # Process each result and create sources directly without deduplication
-            sources_list = []
-            documents = []
-
-            async with self.counter_lock:
-                for _i, result in enumerate(linkup_results):
-                    # Only process results that have content
-                    if not hasattr(result, "content") or not result.content:
-                        continue
-
-                    # Create a source entry
-                    source = {
-                        "id": self.source_id_counter,
-                        "title": (
-                            result.name if hasattr(result, "name") else "Linkup Result"
-                        ),
-                        "description": (
-                            result.content if hasattr(result, "content") else ""
-                        ),
-                        "url": result.url if hasattr(result, "url") else "",
-                    }
-                    sources_list.append(source)
-
-                    # Create a document entry
-                    document = {
-                        "chunk_id": self.source_id_counter,
-                        "content": result.content if hasattr(result, "content") else "",
-                        "score": 1.0,  # Default score since not provided by Linkup
-                        "document": {
-                            "id": self.source_id_counter,
-                            "title": (
-                                result.name
-                                if hasattr(result, "name")
-                                else "Linkup Result"
-                            ),
-                            "document_type": "LINKUP_API",
-                            "metadata": {
-                                "url": result.url if hasattr(result, "url") else "",
-                                "type": result.type if hasattr(result, "type") else "",
-                                "source": "LINKUP_API",
-                            },
-                        },
-                    }
-                    documents.append(document)
-                    self.source_id_counter += 1
-
-            # Create result object
-            result_object = {
-                "id": 10,
-                "name": "Linkup Search",
-                "type": "LINKUP_API",
-                "sources": sources_list,
-            }
-
-            return result_object, documents
-
-        except Exception as e:
-            # Log the error and return empty results
-            print(f"Error searching with Linkup: {e!s}")
-            return {
-                "id": 10,
-                "name": "Linkup Search",
-                "type": "LINKUP_API",
-                "sources": [],
-            }, []
-
     async def search_discord(
         self,
         user_query: str,
-        search_space_id: int,
+        workspace_id: int,
         top_k: int = 20,
         start_date: datetime | None = None,
         end_date: datetime | None = None,
@@ -2109,7 +1530,7 @@ class ConnectorService:
 
         Args:
             user_query: The user's query
-            search_space_id: The search space ID to search in
+            workspace_id: The workspace ID to search in
             top_k: Maximum number of results to return
             start_date: Optional start date for filtering documents by updated_at
             end_date: Optional end date for filtering documents by updated_at
@@ -2119,7 +1540,7 @@ class ConnectorService:
         """
         discord_docs = await self._combined_rrf_search(
             query_text=user_query,
-            search_space_id=search_space_id,
+            workspace_id=workspace_id,
             document_type="DISCORD_CONNECTOR",
             top_k=top_k,
             start_date=start_date,
@@ -2138,7 +1559,7 @@ class ConnectorService:
         def _title_fn(_doc_info: dict[str, Any], metadata: dict[str, Any]) -> str:
             channel_name = metadata.get("channel_name", "Unknown Channel")
             message_date = metadata.get("start_date", "")
-            title = f"Discord: {channel_name}"
+            title = channel_name
             if message_date:
                 title += f" ({message_date})"
             return title
@@ -2169,10 +1590,84 @@ class ConnectorService:
 
         return result_object, discord_docs
 
+    async def search_teams(
+        self,
+        user_query: str,
+        workspace_id: int,
+        top_k: int = 20,
+        start_date: datetime | None = None,
+        end_date: datetime | None = None,
+    ) -> tuple:
+        """
+        Search for Microsoft Teams messages and return both the source information and langchain documents.
+
+        Uses combined chunk-level and document-level hybrid search with RRF fusion.
+
+        Args:
+            user_query: The user's query
+            workspace_id: The workspace ID to search in
+            top_k: Maximum number of results to return
+            start_date: Optional start date for filtering documents by updated_at
+            end_date: Optional end date for filtering documents by updated_at
+
+        Returns:
+            tuple: (sources_info, langchain_documents)
+        """
+        teams_docs = await self._combined_rrf_search(
+            query_text=user_query,
+            workspace_id=workspace_id,
+            document_type="TEAMS_CONNECTOR",
+            top_k=top_k,
+            start_date=start_date,
+            end_date=end_date,
+        )
+
+        # Early return if no results
+        if not teams_docs:
+            return {
+                "id": 53,
+                "name": "Microsoft Teams",
+                "type": "TEAMS_CONNECTOR",
+                "sources": [],
+            }, []
+
+        def _title_fn(_doc_info: dict[str, Any], metadata: dict[str, Any]) -> str:
+            team_name = metadata.get("team_name", "Unknown Team")
+            channel_name = metadata.get("channel_name", "Unknown Channel")
+            message_date = metadata.get("start_date", "")
+            title = f"{team_name} - {channel_name}"
+            if message_date:
+                title += f" ({message_date})"
+            return title
+
+        def _url_fn(_doc_info: dict[str, Any], metadata: dict[str, Any]) -> str:
+            team_id = metadata.get("team_id", "")
+            channel_id = metadata.get("channel_id", "")
+            if team_id and channel_id:
+                return f"https://teams.microsoft.com/l/channel/{channel_id}/General?groupId={team_id}"
+            return ""
+
+        sources_list = self._build_chunk_sources_from_documents(
+            teams_docs,
+            title_fn=_title_fn,
+            url_fn=_url_fn,
+            description_fn=lambda chunk, _doc_info, _metadata: chunk.get("content", ""),
+        )
+
+        # Create result object
+        result_object = {
+            "id": 53,
+            "name": "Microsoft Teams",
+            "type": "TEAMS_CONNECTOR",
+            "sources": sources_list,
+        }
+
+        return result_object, teams_docs
+
     async def search_luma(
         self,
         user_query: str,
-        search_space_id: int,
+        workspace_id: int,
         top_k: int = 20,
         start_date: datetime | None = None,
         end_date: datetime | None = None,
@@ -2184,7 +1679,7 @@ class ConnectorService:
 
         Args:
             user_query: The user's query
-            search_space_id: The search space ID to search in
+            workspace_id: The workspace ID to search in
             top_k: Maximum number of results to return
             start_date: Optional start date for filtering documents by updated_at
             end_date: Optional end date for filtering documents by updated_at
@@ -2194,7 +1689,7 @@ class ConnectorService:
         """
         luma_docs = await self._combined_rrf_search(
             query_text=user_query,
-            search_space_id=search_space_id,
+            workspace_id=workspace_id,
             document_type="LUMA_CONNECTOR",
             top_k=top_k,
             start_date=start_date,
@@ -2213,11 +1708,7 @@ class ConnectorService:
         def _title_fn(_doc_info: dict[str, Any], metadata: dict[str, Any]) -> str:
             event_name = metadata.get("event_name", "Untitled Event")
             start_time = metadata.get("start_time", "")
-            return (
-                f"Luma: {event_name} ({start_time})"
-                if start_time
-                else f"Luma: {event_name}"
-            )
+            return f"{event_name} ({start_time})" if start_time else event_name
 
         def _url_fn(_doc_info: dict[str, Any], metadata: dict[str, Any]) -> str:
             return metadata.get("event_url", "") or ""
@@ -2281,7 +1772,7 @@ class ConnectorService:
     async def search_elasticsearch(
         self,
         user_query: str,
-        search_space_id: int,
+        workspace_id: int,
         top_k: int = 20,
         start_date: datetime | None = None,
         end_date: datetime | None = None,
@@ -2293,7 +1784,7 @@ class ConnectorService:
 
         Args:
             user_query: The user's query
-            search_space_id: The search space ID to search in
+            workspace_id: The workspace ID to search in
             top_k: Maximum number of results to return
             start_date: Optional start date for filtering documents by updated_at
             end_date: Optional end date for filtering documents by updated_at
@@ -2303,7 +1794,7 @@ class ConnectorService:
         """
         elasticsearch_docs = await self._combined_rrf_search(
             query_text=user_query,
-            search_space_id=search_space_id,
+            workspace_id=workspace_id,
             document_type="ELASTICSEARCH_CONNECTOR",
             top_k=top_k,
             start_date=start_date,
@@ -2367,7 +1858,7 @@ class ConnectorService:
     async def search_notes(
         self,
         user_query: str,
-        search_space_id: int,
+        workspace_id: int,
         top_k: int = 20,
         start_date: datetime | None = None,
         end_date: datetime | None = None,
@@ -2379,7 +1870,7 @@ class ConnectorService:
 
         Args:
             user_query: The user's query
-            search_space_id: The search space ID to search in
+            workspace_id: The workspace ID to search in
             top_k: Maximum number of results to return
             start_date: Optional start date for filtering documents by updated_at
             end_date: Optional end date for filtering documents by updated_at
@@ -2389,7 +1880,7 @@ class ConnectorService:
         """
         notes_docs = await self._combined_rrf_search(
             query_text=user_query,
-            search_space_id=search_space_id,
+            workspace_id=workspace_id,
             document_type="NOTE",
             top_k=top_k,
             start_date=start_date,
@@ -2436,7 +1927,7 @@ class ConnectorService:
     async def search_bookstack(
         self,
         user_query: str,
-        search_space_id: int,
+        workspace_id: int,
         top_k: int = 20,
         start_date: datetime | None = None,
         end_date: datetime | None = None,
@@ -2449,7 +1940,7 @@ class ConnectorService:
         Args:
             user_query: The user's query
             user_id: The user's ID
-            search_space_id: The search space ID to search in
+            workspace_id: The workspace ID to search in
             top_k: Maximum number of results to return
             start_date: Optional start date for filtering documents by updated_at
             end_date: Optional end date for filtering documents by updated_at
@@ -2459,7 +1950,7 @@ class ConnectorService:
         """
         bookstack_docs = await self._combined_rrf_search(
             query_text=user_query,
-            search_space_id=search_space_id,
+            workspace_id=workspace_id,
             document_type="BOOKSTACK_CONNECTOR",
             top_k=top_k,
             start_date=start_date,
@@ -2477,7 +1968,7 @@ class ConnectorService:
 
         def _title_fn(_doc_info: dict[str, Any], metadata: dict[str, Any]) -> str:
             page_name = metadata.get("page_name", "Untitled Page")
-            return f"BookStack: {page_name}"
+            return page_name
 
         def _url_fn(_doc_info: dict[str, Any], metadata: dict[str, Any]) -> str:
             page_slug = metadata.get("page_slug", "")
@@ -2506,3 +1997,426 @@ class ConnectorService:
         }
 
         return result_object, bookstack_docs
+
+    async def search_circleback(
+        self,
+        user_query: str,
+        workspace_id: int,
+        top_k: int = 20,
+        start_date: datetime | None = None,
+        end_date: datetime | None = None,
+    ) -> tuple:
+        """
+        Search for Circleback meeting notes and return both the source information and langchain documents.
+
+        Uses combined chunk-level and document-level hybrid search with RRF fusion.
+
+        Args:
+            user_query: The user's query
+            workspace_id: The workspace ID to search in
+            top_k: Maximum number of results to return
+            start_date: Optional start date for filtering documents by updated_at
+            end_date: Optional end date for filtering documents by updated_at
+
+        Returns:
+            tuple: (sources_info, langchain_documents)
+        """
+        circleback_docs = await self._combined_rrf_search(
+            query_text=user_query,
+            workspace_id=workspace_id,
+            document_type="CIRCLEBACK",
+            top_k=top_k,
+            start_date=start_date,
+            end_date=end_date,
+        )
+
+        # Early return if no results
+        if not circleback_docs:
+            return {
+                "id": 52,
+                "name": "Circleback Meetings",
+                "type": "CIRCLEBACK",
+                "sources": [],
+            }, []
+
+        def _title_fn(doc_info: dict[str, Any], metadata: dict[str, Any]) -> str:
+            meeting_name = metadata.get("meeting_name", "")
+            meeting_date = metadata.get("meeting_date", "")
+            title = doc_info.get("title") or meeting_name or "Circleback Meeting"
+            if meeting_date:
+                title += f" ({meeting_date})"
+            return title
+
+        def _url_fn(_doc_info: dict[str, Any], metadata: dict[str, Any]) -> str:
+            meeting_id = metadata.get("circleback_meeting_id", "")
+            return (
+                f"https://app.circleback.ai/meetings/{meeting_id}" if meeting_id else ""
+            )
+
+        def _description_fn(
+            chunk: dict[str, Any], _doc_info: dict[str, Any], metadata: dict[str, Any]
+        ) -> str:
+            description = self._chunk_preview(chunk.get("content", ""), limit=200)
+            info_parts = []
+            duration = metadata.get("duration_seconds")
+            attendee_count = metadata.get("attendee_count")
+            if duration:
+                minutes = int(duration) // 60
+                info_parts.append(f"Duration: {minutes} min")
+            if attendee_count:
+                info_parts.append(f"Attendees: {attendee_count}")
+            if info_parts:
+                description = (description + " | " + " | ".join(info_parts)).strip(" |")
+            return description
+
+        def _extra_fields_fn(
+            _chunk: dict[str, Any], _doc_info: dict[str, Any], metadata: dict[str, Any]
+        ) -> dict[str, Any]:
+            return {
+                "circleback_meeting_id": metadata.get("circleback_meeting_id", ""),
+                "meeting_name": metadata.get("meeting_name", ""),
+                "meeting_date": metadata.get("meeting_date", ""),
+                "duration_seconds": metadata.get("duration_seconds", 0),
+                "attendee_count": metadata.get("attendee_count", 0),
+            }
+
+        sources_list = self._build_chunk_sources_from_documents(
+            circleback_docs,
+            title_fn=_title_fn,
+            url_fn=_url_fn,
+            description_fn=_description_fn,
+            extra_fields_fn=_extra_fields_fn,
+        )
+
+        # Create result object
+        result_object = {
+            "id": 52,
+            "name": "Circleback Meetings",
+            "type": "CIRCLEBACK",
+            "sources": sources_list,
+        }
+
+        return result_object, circleback_docs
+
+    async def search_obsidian(
+        self,
+        user_query: str,
+        workspace_id: int,
+        top_k: int = 20,
+        start_date: datetime | None = None,
+        end_date: datetime | None = None,
+    ) -> tuple:
+        """
+        Search for Obsidian vault notes and return both the source information and langchain documents.
+
+        Uses combined chunk-level and document-level hybrid search with RRF fusion.
+
+        Args:
+            user_query: The user's query
+            workspace_id: The workspace ID to search in
+            top_k: Maximum number of results to return
+            start_date: Optional start date for filtering documents by updated_at
+            end_date: Optional end date for filtering documents by updated_at
+
+        Returns:
+            tuple: (sources_info, langchain_documents)
+        """
+        obsidian_docs = await self._combined_rrf_search(
+            query_text=user_query,
+            workspace_id=workspace_id,
+            document_type="OBSIDIAN_CONNECTOR",
+            top_k=top_k,
+            start_date=start_date,
+            end_date=end_date,
+        )
+
+        # Early return if no results
+        if not obsidian_docs:
+            return {
+                "id": 53,
+                "name": "Obsidian Vault",
+                "type": "OBSIDIAN_CONNECTOR",
+                "sources": [],
+            }, []
+
+        def _title_fn(doc_info: dict[str, Any], metadata: dict[str, Any]) -> str:
+            return doc_info.get("title", "Untitled Note")
+
+        def _url_fn(doc_info: dict[str, Any], metadata: dict[str, Any]) -> str:
+            # Obsidian URL format: obsidian://vault_name/path
+            return doc_info.get("url", "")
+
+        def _description_fn(
+            chunk: dict[str, Any], _doc_info: dict[str, Any], metadata: dict[str, Any]
+        ) -> str:
+            description = self._chunk_preview(chunk.get("content", ""), limit=200)
+            info_parts = []
+            vault_name = metadata.get("vault_name")
+            tags = metadata.get("tags", [])
+            if vault_name:
+                info_parts.append(f"Vault: {vault_name}")
+            if tags and isinstance(tags, list) and len(tags) > 0:
+                info_parts.append(f"Tags: {', '.join(tags[:3])}")
+            if info_parts:
+                description = (description + " | " + " | ".join(info_parts)).strip(" |")
+            return description
+
+        def _extra_fields_fn(
+            _chunk: dict[str, Any], _doc_info: dict[str, Any], metadata: dict[str, Any]
+        ) -> dict[str, Any]:
+            return {
+                "vault_name": metadata.get("vault_name", ""),
+                "file_path": metadata.get("file_path", ""),
+                "tags": metadata.get("tags", []),
+                "outgoing_links": metadata.get("outgoing_links", []),
+            }
+
+        sources_list = self._build_chunk_sources_from_documents(
+            obsidian_docs,
+            title_fn=_title_fn,
+            url_fn=_url_fn,
+            description_fn=_description_fn,
+            extra_fields_fn=_extra_fields_fn,
+        )
+
+        # Create result object
+        result_object = {
+            "id": 53,
+            "name": "Obsidian Vault",
+            "type": "OBSIDIAN_CONNECTOR",
+            "sources": sources_list,
+        }
+
+        return result_object, obsidian_docs
+
+    # =========================================================================
+    # Utility Methods for Connector Discovery
+    # =========================================================================
+
+    async def get_available_connectors(
+        self,
+        workspace_id: int,
+    ) -> list[SearchSourceConnectorType]:
+        """
+        Get all available (enabled) connector types for a workspace.
+
+        Phase 1.4: results are cached per ``workspace_id`` for
+        :data:`_DISCOVERY_TTL_SECONDS`. Cache key is independent of session
+        identity — the cached value is plain data, safe to share across
+        requests. Invalidate on connector add/update/delete via
+        :func:`invalidate_connector_discovery_cache`.
+
+        Args:
+            workspace_id: The workspace ID
+
+        Returns:
+            List of SearchSourceConnectorType enums for enabled connectors
+        """
+        cached = _get_cached_connectors(workspace_id)
+        if cached is not None:
+            return list(cached)
+
+        query = (
+            select(SearchSourceConnector.connector_type)
+            .filter(
+                SearchSourceConnector.workspace_id == workspace_id,
+            )
+            .distinct()
+        )
+
+        result = await self.session.execute(query)
+        connector_types = list(result.scalars().all())
+        _set_cached_connectors(workspace_id, connector_types)
+        return connector_types
+
+    async def get_available_document_types(
+        self,
+        workspace_id: int,
+    ) -> list[str]:
+        """
+        Get all document types that have at least one document in the workspace.
+
+        Phase 1.4: cached per ``workspace_id`` for
+        :data:`_DISCOVERY_TTL_SECONDS`. Invalidate via
+        :func:`invalidate_connector_discovery_cache` when a connector
+        finishes indexing new documents (or document types are otherwise
+        added/removed).
+
+        Args:
+            workspace_id: The workspace ID
+
+        Returns:
+            List of document type strings that have documents indexed
+        """
+        cached = _get_cached_doc_types(workspace_id)
+        if cached is not None:
+            return list(cached)
+
+        from sqlalchemy import distinct
+
+        from app.db import Document
+
+        query = select(distinct(Document.document_type)).filter(
+            Document.workspace_id == workspace_id,
+        )
+
+        result = await self.session.execute(query)
+        doc_types = [str(dt) for dt in result.scalars().all()]
+        _set_cached_doc_types(workspace_id, doc_types)
+        return doc_types
+
+
+# ---------------------------------------------------------------------------
+# Connector / document-type discovery TTL cache (Phase 1.4)
+# ---------------------------------------------------------------------------
+#
+# Both ``get_available_connectors`` and ``get_available_document_types`` are
+# called on EVERY chat turn from ``create_surfsense_deep_agent``. Each query
+# hits Postgres and contributes to per-turn agent build latency. Their
+# results change infrequently — only when the user adds/edits/removes a
+# connector, or when an indexer commits a new document type. A short TTL
+# cache (default 30s, env-tunable) collapses N concurrent calls into one
+# DB roundtrip with bounded staleness.
+#
+# Invalidation: connector mutation routes (create / update / delete) call
+# ``invalidate_connector_discovery_cache(workspace_id)`` to clear the
+# entry for the affected space. Multi-replica deployments still pay one
+# DB roundtrip per replica per TTL window, which is fine — staleness is
+# bounded and the alternative (cross-replica fanout) is not worth the
+# coupling here.
+
+_DISCOVERY_TTL_SECONDS: float = config.CONNECTOR_DISCOVERY_TTL_SECONDS
+
+# Per-workspace caches. Keyed by ``workspace_id``; value is
+# ``(expires_at_monotonic, payload)``. Plain dicts protected by a lock —
+# read-mostly workload, sub-microsecond contention.
+_connectors_cache: dict[int, tuple[float, list[SearchSourceConnectorType]]] = {}
+_doc_types_cache: dict[int, tuple[float, list[str]]] = {}
+_cache_lock = Lock()
+
+
+def _get_cached_connectors(
+    workspace_id: int,
+) -> list[SearchSourceConnectorType] | None:
+    if _DISCOVERY_TTL_SECONDS <= 0:
+        return None
+    with _cache_lock:
+        entry = _connectors_cache.get(workspace_id)
+        if entry is None:
+            return None
+        expires_at, payload = entry
+        if time.monotonic() >= expires_at:
+            _connectors_cache.pop(workspace_id, None)
+            return None
+        return payload
+
+
+def _set_cached_connectors(
+    workspace_id: int, payload: list[SearchSourceConnectorType]
+) -> None:
+    if _DISCOVERY_TTL_SECONDS <= 0:
+        return
+    expires_at = time.monotonic() + _DISCOVERY_TTL_SECONDS
+    with _cache_lock:
+        _connectors_cache[workspace_id] = (expires_at, list(payload))
+
+
+def _get_cached_doc_types(workspace_id: int) -> list[str] | None:
+    if _DISCOVERY_TTL_SECONDS <= 0:
+        return None
+    with _cache_lock:
+        entry = _doc_types_cache.get(workspace_id)
+        if entry is None:
+            return None
+        expires_at, payload = entry
+        if time.monotonic() >= expires_at:
+            _doc_types_cache.pop(workspace_id, None)
+            return None
+        return payload
+
+
+def _set_cached_doc_types(workspace_id: int, payload: list[str]) -> None:
+    if _DISCOVERY_TTL_SECONDS <= 0:
+        return
+    expires_at = time.monotonic() + _DISCOVERY_TTL_SECONDS
+    with _cache_lock:
+        _doc_types_cache[workspace_id] = (expires_at, list(payload))
+
+
+def invalidate_connector_discovery_cache(workspace_id: int | None = None) -> None:
+    """Drop cached discovery results for ``workspace_id`` (or all spaces).
+
+    Connector CRUD routes / indexer pipelines call this when they mutate
+    the rows backing :func:`ConnectorService.get_available_connectors` /
+    :func:`get_available_document_types`. ``None`` clears every space —
+    useful in tests and on bulk imports.
+    """
+    with _cache_lock:
+        if workspace_id is None:
+            _connectors_cache.clear()
+            _doc_types_cache.clear()
+        else:
+            _connectors_cache.pop(workspace_id, None)
+            _doc_types_cache.pop(workspace_id, None)
+
+
+def _invalidate_connectors_only(workspace_id: int | None = None) -> None:
+    with _cache_lock:
+        if workspace_id is None:
+            _connectors_cache.clear()
+        else:
+            _connectors_cache.pop(workspace_id, None)
+
+
+def _invalidate_doc_types_only(workspace_id: int | None = None) -> None:
+    with _cache_lock:
+        if workspace_id is None:
+            _doc_types_cache.clear()
+        else:
+            _doc_types_cache.pop(workspace_id, None)
+
+
+def _register_invalidation_listeners() -> None:
+    """Wire SQLAlchemy ORM events so cache stays consistent automatically.
+
+    Listening on ``after_insert`` / ``after_update`` / ``after_delete``
+    means every successful INSERT/UPDATE/DELETE that goes through the ORM
+    invalidates the affected workspace's cached discovery payload —
+    no need to sprinkle ``invalidate_*`` calls across 30+ connector
+    routes. Bulk operations that bypass the ORM (e.g.
+    ``session.execute(insert(...))`` without a mapped object) still need
+    explicit invalidation; document indexers already commit through the
+    ORM so document-type discovery is covered.
+    """
+    from sqlalchemy import event
+
+    # Imported here (not at module top) to avoid a circular import:
+    # app.services.connector_service is itself imported from app.db's
+    # ecosystem indirectly via several CRUD modules.
+    from app.db import Document, SearchSourceConnector
+
+    def _connector_changed(_mapper, _connection, target) -> None:
+        sid = getattr(target, "workspace_id", None)
+        if sid is not None:
+            _invalidate_connectors_only(int(sid))
+
+    def _document_changed(_mapper, _connection, target) -> None:
+        sid = getattr(target, "workspace_id", None)
+        if sid is not None:
+            _invalidate_doc_types_only(int(sid))
+
+    for evt in ("after_insert", "after_update", "after_delete"):
+        event.listen(SearchSourceConnector, evt, _connector_changed)
+        event.listen(Document, evt, _document_changed)
+
+
+try:
+    _register_invalidation_listeners()
+except Exception:  # pragma: no cover - defensive; never block module import
+    import logging as _logging
+
+    _logging.getLogger(__name__).exception(
+        "Failed to register connector discovery cache invalidation listeners; "
+        "stale cache risk: explicit invalidate_connector_discovery_cache calls "
+        "may be required."
+    )

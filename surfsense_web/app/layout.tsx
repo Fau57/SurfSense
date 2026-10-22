@@ -1,81 +1,104 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import "./globals.css";
-import { GoogleAnalytics } from "@next/third-parties/google";
-import { RootProvider } from "fumadocs-ui/provider";
+import { RootProvider } from "fumadocs-ui/provider/next";
 import { Roboto } from "next/font/google";
+import Script from "next/script";
+import { AnnouncementToastProvider } from "@/components/announcements/AnnouncementToastProvider";
+import { DesktopUpdateToast } from "@/components/desktop/desktop-update-toast";
+import { AuthCutoverPurge } from "@/components/providers/AuthCutoverPurge";
+import { GlobalLoadingProvider } from "@/components/providers/GlobalLoadingProvider";
 import { I18nProvider } from "@/components/providers/I18nProvider";
+import { PostHogProvider } from "@/components/providers/PostHogProvider";
+import { ZeroProvider } from "@/components/providers/ZeroProvider";
+import {
+	OrganizationJsonLd,
+	SoftwareApplicationJsonLd,
+	WebSiteJsonLd,
+} from "@/components/seo/json-ld";
 import { ThemeProvider } from "@/components/theme/theme-provider";
 import { Toaster } from "@/components/ui/sonner";
 import { LocaleProvider } from "@/contexts/LocaleContext";
+import { PlatformProvider } from "@/contexts/platform-context";
+import { BUILD_TIME_AUTH_TYPE } from "@/lib/env-config";
 import { ReactQueryClientProvider } from "@/lib/query-client/query-client.provider";
+import { getRuntimeAuthInitScript, resolveRuntimeAuthUiMode } from "@/lib/runtime-auth-config";
 import { cn } from "@/lib/utils";
 
 const roboto = Roboto({
 	subsets: ["latin"],
 	weight: ["400", "500", "700"],
-	display: "swap",
+	// "optional": use Roboto only if it's ready almost immediately; otherwise
+	// keep the fallback for this page view. "swap" (the default) always swaps
+	// in Roboto once it arrives, which produced a visible font jump on load.
+	display: "optional",
 	variable: "--font-roboto",
 });
 
+/**
+ * Viewport configuration for mobile keyboard handling.
+ * - interactiveWidget: 'resizes-content' tells mobile browsers (especially Chrome Android)
+ *   to resize the CSS layout viewport when the virtual keyboard opens, so sticky elements
+ *   (like the chat input bar) stay visible above the keyboard.
+ * - viewportFit: 'cover' enables env(safe-area-inset-*) for notched/home-indicator devices.
+ */
+export const viewport: Viewport = {
+	width: "device-width",
+	initialScale: 1,
+	viewportFit: "cover",
+	interactiveWidget: "resizes-content",
+};
+
 export const metadata: Metadata = {
-	title: "SurfSense – Customizable AI Research & Knowledge Management Assistant",
+	metadataBase: new URL("https://www.surfsense.com"),
+	alternates: {
+		canonical: "https://www.surfsense.com",
+	},
+	title: "SurfSense: Open-Source NotebookLM Alternative & Web Research",
 	description:
-		"SurfSense is an AI-powered research assistant that integrates with tools like Notion, GitHub, Slack, and more to help you efficiently manage, search, and chat with your documents. Generate podcasts, perform hybrid search, and unlock insights from your knowledge base.",
+		"The open-source NotebookLM alternative. Research the open web with live data from Reddit, YouTube, TikTok, Indeed & more, through one platform, API, or MCP server.",
 	keywords: [
+		"open web research platform",
+		"web research for AI agents",
+		"live web data for agents",
+		"web scraping API",
+		"reddit scraper api",
+		"youtube scraper api",
+		"deep research agent",
+		"mcp server",
+		"agent harness",
+		"open source NotebookLM alternative",
 		"SurfSense",
-		"AI research assistant",
-		"AI knowledge management",
-		"AI document assistant",
-		"customizable AI assistant",
-		"notion integration",
-		"slack integration",
-		"github integration",
-		"hybrid search",
-		"vector search",
-		"RAG",
-		"LangChain",
-		"FastAPI",
-		"LLM apps",
-		"AI document chat",
-		"knowledge management AI",
-		"AI-powered document search",
-		"personal AI assistant",
-		"AI research tools",
-		"AI podcast generator",
-		"AI knowledge base",
-		"AI document assistant tools",
-		"AI-powered search assistant",
 	],
 	openGraph: {
-		title: "SurfSense – AI Research & Knowledge Management Assistant",
+		title: "SurfSense - NotebookLM for Open Web Research",
 		description:
-			"Connect your documents and tools like Notion, Slack, GitHub, and more to your private AI assistant. SurfSense offers powerful search, document chat, podcast generation, and RAG APIs to enhance your workflow.",
-		url: "https://surfsense.com",
+			"The open-source NotebookLM alternative. Research the open web with live data from Reddit, YouTube, TikTok, Indeed & more, through one platform, API, or MCP server.",
+		url: "https://www.surfsense.com",
 		siteName: "SurfSense",
 		type: "website",
 		images: [
 			{
-				url: "https://surfsense.com/og-image.png",
+				url: "/og-image.png",
 				width: 1200,
 				height: 630,
-				alt: "SurfSense AI Research Assistant",
+				alt: "SurfSense, the air-gapped open-source NotebookLM alternative",
 			},
 		],
 		locale: "en_US",
 	},
 	twitter: {
 		card: "summary_large_image",
-		title: "SurfSense – AI Assistant for Research & Knowledge Management",
+		title: "SurfSense - NotebookLM for Open Web Research",
 		description:
-			"Have your own NotebookLM or Perplexity, but better. SurfSense connects external tools, allows chat with your documents, and generates fast, high-quality podcasts.",
-		creator: "https://surfsense.com",
-		site: "https://surfsense.com",
+			"The open-source NotebookLM alternative. Research the open web with live data from Reddit, YouTube, TikTok, Indeed & more, through one platform, API, or MCP server.",
+		creator: "@SurfSenseAI",
+		site: "@SurfSenseAI",
 		images: [
 			{
-				url: "https://surfsense.com/og-image-twitter.png",
+				url: "/og-image.png",
 				width: 1200,
 				height: 630,
-				alt: "SurfSense AI Assistant Preview",
+				alt: "SurfSense, the air-gapped open-source NotebookLM alternative",
 			},
 		],
 	},
@@ -90,24 +113,55 @@ export default function RootLayout({
 	// Language can be switched dynamically through LanguageSwitcher component
 	// Locale state is managed by LocaleContext and persisted in localStorage
 	return (
-		<html lang="en" suppressHydrationWarning>
-			<GoogleAnalytics gaId="G-T4CHE7W3TE" />
-			<body className={cn(roboto.className, "bg-white dark:bg-black antialiased h-full w-full ")}>
-				<LocaleProvider>
-					<I18nProvider>
-						<ThemeProvider
-							attribute="class"
-							enableSystem
-							disableTransitionOnChange
-							defaultTheme="light"
-						>
-							<RootProvider>
-								<ReactQueryClientProvider>{children}</ReactQueryClientProvider>
-								<Toaster />
-							</RootProvider>
-						</ThemeProvider>
-					</I18nProvider>
-				</LocaleProvider>
+		<html
+			lang="en"
+			data-surfsense-auth-type={resolveRuntimeAuthUiMode(BUILD_TIME_AUTH_TYPE)}
+			suppressHydrationWarning
+		>
+			<head>
+				<Script id="surfsense-runtime-auth-init" strategy="beforeInteractive">
+					{getRuntimeAuthInitScript(BUILD_TIME_AUTH_TYPE)}
+				</Script>
+				<link rel="preconnect" href="https://api.github.com" />
+				<OrganizationJsonLd />
+				<WebSiteJsonLd />
+				<SoftwareApplicationJsonLd />
+			</head>
+			<body
+				className={cn(roboto.className, roboto.variable, "bg-[#141414] antialiased h-full w-full ")}
+			>
+				<PostHogProvider>
+					<LocaleProvider>
+						<I18nProvider>
+							{/* Dark is the only supported palette. storageKey is bumped off "theme"
+							    so a "light" value saved by the removed toggle cannot come back
+							    through resolvedTheme and leave Monaco, toasts and code blocks
+							    light on a dark page. */}
+							<ThemeProvider
+								attribute="class"
+								enableSystem={false}
+								disableTransitionOnChange
+								defaultTheme="dark"
+								forcedTheme="dark"
+								storageKey="surfsense-theme"
+							>
+								<PlatformProvider>
+									<RootProvider>
+										<ReactQueryClientProvider>
+											<AuthCutoverPurge />
+											<ZeroProvider>
+												<GlobalLoadingProvider>{children}</GlobalLoadingProvider>
+											</ZeroProvider>
+										</ReactQueryClientProvider>
+										<DesktopUpdateToast />
+										<Toaster />
+										<AnnouncementToastProvider />
+									</RootProvider>
+								</PlatformProvider>
+							</ThemeProvider>
+						</I18nProvider>
+					</LocaleProvider>
+				</PostHogProvider>
 			</body>
 		</html>
 	);

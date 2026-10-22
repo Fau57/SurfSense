@@ -1,31 +1,58 @@
 /**
- * Authentication utilities for handling token expiration and redirects
+ * Authentication utilities for handling session expiration and redirects.
  */
+import { buildBackendUrl } from "@/lib/env-config";
+import { isPublicRoute } from "@/lib/public-routes";
+
+export { isPublicRoute };
 
 const REDIRECT_PATH_KEY = "surfsense_redirect_path";
-const BEARER_TOKEN_KEY = "surfsense_bearer_token";
+const LEGACY_BEARER_TOKEN_KEY = "surfsense_bearer_token";
+const LEGACY_REFRESH_TOKEN_KEY = "surfsense_refresh_token";
+
+export function isDesktopClient(): boolean {
+	return typeof window !== "undefined" && !!window.electronAPI;
+}
+
+function purgeLegacyStoredTokens(): void {
+	if (typeof window === "undefined") return;
+	localStorage.removeItem(LEGACY_BEARER_TOKEN_KEY);
+	localStorage.removeItem(LEGACY_REFRESH_TOKEN_KEY);
+}
+
+export function getLoginPath(): string {
+	if (typeof window !== "undefined" && window.electronAPI) return "/desktop/login";
+	return "/login";
+}
 
 /**
- * Saves the current path and redirects to login page
- * Call this when a 401 response is received
+ * Clears auth state and optionally redirects to login.
+ * Call this when a 401 response is received.
+ * Only redirects when the current route is protected; on public routes we just clear state.
  */
 export function handleUnauthorized(): void {
 	if (typeof window === "undefined") return;
 
-	// Save the current path (including search params and hash) for redirect after login
-	const currentPath = window.location.pathname + window.location.search + window.location.hash;
+	const pathname = window.location.pathname;
+	purgeLegacyStoredTokens();
 
-	// Don't save auth-related paths
-	const excludedPaths = ["/auth", "/auth/callback", "/"];
-	if (!excludedPaths.includes(window.location.pathname)) {
-		localStorage.setItem(REDIRECT_PATH_KEY, currentPath);
+	// Only redirect on protected routes; stay on public pages (e.g. /docs)
+	if (!isPublicRoute(pathname)) {
+		const currentPath = pathname + window.location.search + window.location.hash;
+		const excludedPaths = ["/auth", "/"];
+		if (!excludedPaths.includes(pathname)) {
+			setRedirectPath(currentPath);
+		}
+		window.location.href = getLoginPath();
 	}
+}
 
-	// Clear the token
-	localStorage.removeItem(BEARER_TOKEN_KEY);
-
-	// Redirect to home page (which has login options)
-	window.location.href = "/login";
+/**
+ * Stores the path to redirect to after successful authentication.
+ */
+export function setRedirectPath(path: string): void {
+	if (typeof window === "undefined") return;
+	localStorage.setItem(REDIRECT_PATH_KEY, path);
 }
 
 /**
@@ -42,35 +69,54 @@ export function getAndClearRedirectPath(): string | null {
 	return redirectPath;
 }
 
-/**
- * Gets the bearer token from localStorage
- */
-export function getBearerToken(): string | null {
-	if (typeof window === "undefined") return null;
-	return localStorage.getItem(BEARER_TOKEN_KEY);
+export function getPostLoginRedirectPath(defaultPath = "/dashboard"): string {
+	return getAndClearRedirectPath() || defaultPath;
 }
 
 /**
- * Sets the bearer token in localStorage
+ * Logout the current user by revoking the refresh token and clearing localStorage.
+ * Returns true if logout was successful (or tokens were cleared), false otherwise.
  */
-export function setBearerToken(token: string): void {
-	if (typeof window === "undefined") return;
-	localStorage.setItem(BEARER_TOKEN_KEY, token);
+export async function logout(): Promise<boolean> {
+	const isDesktop = isDesktopClient();
+
+	if (isDesktop && window.electronAPI?.logout) {
+		await window.electronAPI.logout();
+		purgeLegacyStoredTokens();
+		return true;
+	}
+
+	try {
+		const response = await fetch(buildBackendUrl("/auth/jwt/revoke"), {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+			},
+			credentials: "include",
+		});
+
+		if (!response.ok) {
+			console.warn("Failed to revoke refresh token:", response.status, await response.text());
+		}
+	} catch (error) {
+		console.warn("Failed to revoke refresh token on server:", error);
+		// Continue to clear local state even if server revoke fails.
+	}
+
+	purgeLegacyStoredTokens();
+	return true;
 }
 
 /**
- * Clears the bearer token from localStorage
- */
-export function clearBearerToken(): void {
-	if (typeof window === "undefined") return;
-	localStorage.removeItem(BEARER_TOKEN_KEY);
-}
-
-/**
- * Checks if the user is authenticated (has a token)
+ * Compatibility helper for legacy query gates.
+ *
+ * Web auth is cookie-backed, so the client cannot synchronously prove whether a
+ * session exists. Return true and let `/auth/session` or API 401s settle it.
+ * Desktop can synchronously check for the Electron bridge, while the access
+ * token itself is resolved asynchronously by auth-fetch.
  */
 export function isAuthenticated(): boolean {
-	return !!getBearerToken();
+	return true;
 }
 
 /**
@@ -85,89 +131,57 @@ export function redirectToLogin(): void {
 	const currentPath = window.location.pathname + window.location.search + window.location.hash;
 
 	// Don't save auth-related paths or home page
-	const excludedPaths = ["/auth", "/auth/callback", "/", "/login", "/register"];
+	const excludedPaths = ["/auth", "/", "/login", "/register", "/desktop/login"];
 	if (!excludedPaths.includes(window.location.pathname)) {
-		localStorage.setItem(REDIRECT_PATH_KEY, currentPath);
+		setRedirectPath(currentPath);
 	}
 
-	// Redirect to login page
-	window.location.href = "/login";
+	window.location.href = getLoginPath();
 }
 
-/**
- * Creates headers with authorization bearer token
- */
-export function getAuthHeaders(additionalHeaders?: Record<string, string>): Record<string, string> {
-	const token = getBearerToken();
-	return {
-		...(token ? { Authorization: `Bearer ${token}` } : {}),
-		...additionalHeaders,
-	};
-}
-
-/**
- * Authenticated fetch wrapper that handles 401 responses uniformly
- * Automatically redirects to login on 401 and saves the current path
- */
-export async function authenticatedFetch(
-	url: string,
-	options?: RequestInit & { skipAuthRedirect?: boolean }
-): Promise<Response> {
-	const { skipAuthRedirect = false, ...fetchOptions } = options || {};
-
-	const headers = getAuthHeaders(fetchOptions.headers as Record<string, string>);
-
-	const response = await fetch(url, {
-		...fetchOptions,
-		headers,
-	});
-
-	// Handle 401 Unauthorized
-	if (response.status === 401 && !skipAuthRedirect) {
-		handleUnauthorized();
-		throw new Error("Unauthorized: Redirecting to login page");
+async function doRefreshSession(): Promise<boolean> {
+	if (isDesktopClient()) {
+		const token = await window.electronAPI?.refreshAccessToken?.();
+		return !!token;
 	}
 
-	return response;
-}
-
-/**
- * Type for the result of a fetch operation with built-in error handling
- */
-export type FetchResult<T> =
-	| { success: true; data: T; response: Response }
-	| { success: false; error: string; status?: number };
-
-/**
- * Authenticated fetch with JSON response handling
- * Returns a result object instead of throwing on non-401 errors
- */
-export async function authenticatedFetchJson<T = unknown>(
-	url: string,
-	options?: RequestInit & { skipAuthRedirect?: boolean }
-): Promise<FetchResult<T>> {
 	try {
-		const response = await authenticatedFetch(url, options);
+		const response = await fetch(buildBackendUrl("/auth/jwt/refresh"), {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+			},
+			credentials: "include",
+		});
 
 		if (!response.ok) {
-			const errorData = await response.json().catch(() => ({}));
-			return {
-				success: false,
-				error: errorData.detail || `Request failed: ${response.status}`,
-				status: response.status,
-			};
+			purgeLegacyStoredTokens();
+			return false;
 		}
 
-		const data = await response.json();
-		return { success: true, data, response };
-	} catch (err: any) {
-		// Re-throw if it's the unauthorized redirect
-		if (err.message?.includes("Unauthorized")) {
-			throw err;
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+let refreshPromise: Promise<boolean> | null = null;
+
+export async function refreshSession(): Promise<boolean> {
+	if (refreshPromise) {
+		return refreshPromise;
+	}
+
+	refreshPromise = (async () => {
+		if (typeof navigator !== "undefined" && "locks" in navigator) {
+			return navigator.locks.request("ss-token-refresh", () => doRefreshSession());
 		}
-		return {
-			success: false,
-			error: err.message || "Request failed",
-		};
+		return doRefreshSession();
+	})();
+
+	try {
+		return await refreshPromise;
+	} finally {
+		refreshPromise = null;
 	}
 }

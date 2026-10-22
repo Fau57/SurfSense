@@ -2,34 +2,18 @@
 
 import logging
 
-from sqlalchemy import delete, select
+from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import selectinload
-from sqlalchemy.pool import NullPool
 
 from app.celery_app import celery_app
-from app.config import config
 from app.db import Document
-from app.services.llm_service import get_user_long_context_llm
+from app.indexing_pipeline.adapters.file_upload_adapter import UploadDocumentAdapter
+from app.knowledge_store.settings import knowledge_store_enabled_for
 from app.services.task_logging_service import TaskLoggingService
-from app.utils.blocknote_converter import convert_blocknote_to_markdown
-from app.utils.document_converters import (
-    create_document_chunks,
-    generate_document_summary,
-)
+from app.tasks.celery_tasks import get_celery_session_maker, run_async_celery_task
 
 logger = logging.getLogger(__name__)
-
-
-def get_celery_session_maker():
-    """Create async session maker for Celery tasks."""
-    engine = create_async_engine(
-        config.DATABASE_URL,
-        poolclass=NullPool,
-        echo=False,
-    )
-    return async_sessionmaker(engine, expire_on_commit=False)
 
 
 @celery_app.task(name="reindex_document", bind=True)
@@ -41,21 +25,12 @@ def reindex_document_task(self, document_id: int, user_id: str):
         document_id: ID of document to reindex
         user_id: ID of user who edited the document
     """
-    import asyncio
-
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-
-    try:
-        loop.run_until_complete(_reindex_document(document_id, user_id))
-    finally:
-        loop.close()
+    return run_async_celery_task(lambda: _reindex_document(document_id, user_id))
 
 
 async def _reindex_document(document_id: int, user_id: str):
     """Async function to reindex a document."""
     async with get_celery_session_maker()() as session:
-        # First, get the document to get search_space_id for logging
         result = await session.execute(
             select(Document)
             .options(selectinload(Document.chunks))
@@ -67,10 +42,22 @@ async def _reindex_document(document_id: int, user_id: str):
             logger.error(f"Document {document_id} not found")
             return
 
-        # Initialize task logger
-        task_logger = TaskLoggingService(session, document.search_space_id)
+        if await knowledge_store_enabled_for(document.workspace_id):
+            # The store indexer owns this document's chunks. Both writers would
+            # otherwise reconcile the same rows from different sources — this one
+            # from Postgres `source_markdown` with the editor's first-heading
+            # title, the indexer from git with the filename stem — so the title
+            # would flip on every save. Guarded here rather than at the two call
+            # sites so neither can be missed.
+            logger.info(
+                "Skipping editor reindex of document %s; "
+                "the knowledge-store indexer owns its chunks",
+                document_id,
+            )
+            return
 
-        # Log task start
+        task_logger = TaskLoggingService(session, document.workspace_id)
+
         log_entry = await task_logger.log_task_start(
             task_name="document_reindex",
             source="editor",
@@ -84,76 +71,24 @@ async def _reindex_document(document_id: int, user_id: str):
         )
 
         try:
-            if not document.blocknote_document:
+            if not document.source_markdown:
                 await task_logger.log_task_failure(
                     log_entry,
-                    f"Document {document_id} has no BlockNote content to reindex",
-                    "No BlockNote content",
-                    {"error_type": "NoBlockNoteContent"},
+                    f"Document {document_id} has no source_markdown to reindex",
+                    "No source_markdown content",
+                    {"error_type": "NoSourceMarkdown"},
                 )
                 return
 
             logger.info(f"Reindexing document {document_id} ({document.title})")
 
-            # 1. Convert BlockNote → Markdown
-            markdown_content = await convert_blocknote_to_markdown(
-                document.blocknote_document
-            )
+            adapter = UploadDocumentAdapter(session)
+            await adapter.reindex(document=document)
 
-            if not markdown_content:
-                await task_logger.log_task_failure(
-                    log_entry,
-                    f"Failed to convert document {document_id} to markdown",
-                    "Markdown conversion failed",
-                    {"error_type": "ConversionError"},
-                )
-                return
-
-            # 2. Delete old chunks explicitly
-            from app.db import Chunk
-
-            await session.execute(delete(Chunk).where(Chunk.document_id == document_id))
-            await session.flush()  # Ensure old chunks are deleted
-
-            # 3. Create new chunks
-            new_chunks = await create_document_chunks(markdown_content)
-
-            # 4. Add new chunks to session
-            for chunk in new_chunks:
-                chunk.document_id = document_id
-                session.add(chunk)
-
-            logger.info(f"Created {len(new_chunks)} chunks for document {document_id}")
-
-            # 5. Regenerate summary
-            user_llm = await get_user_long_context_llm(
-                session, user_id, document.search_space_id
-            )
-
-            document_metadata = {
-                "title": document.title,
-                "document_type": document.document_type.value,
-            }
-
-            summary_content, summary_embedding = await generate_document_summary(
-                markdown_content, user_llm, document_metadata
-            )
-
-            # 6. Update document
-            document.content = summary_content
-            document.embedding = summary_embedding
-            document.content_needs_reindexing = False
-
-            await session.commit()
-
-            # Log success
             await task_logger.log_task_success(
                 log_entry,
                 f"Successfully reindexed document: {document.title}",
-                {
-                    "chunks_created": len(new_chunks),
-                    "document_id": document_id,
-                },
+                {"document_id": document_id},
             )
 
             logger.info(f"Successfully reindexed document {document_id}")

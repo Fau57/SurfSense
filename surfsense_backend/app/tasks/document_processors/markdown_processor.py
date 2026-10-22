@@ -7,28 +7,123 @@ import logging
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db import Document, DocumentType
-from app.services.llm_service import get_user_long_context_llm
+from app.db import Document, DocumentStatus, DocumentType
 from app.services.task_logging_service import TaskLoggingService
 from app.utils.document_converters import (
     create_document_chunks,
+    embed_text,
     generate_content_hash,
-    generate_document_summary,
-    generate_unique_identifier_hash,
+    truncate_for_embedding,
 )
 
-from .base import (
-    check_document_by_unique_identifier,
-    get_current_timestamp,
+from ._helpers import (
+    find_existing_document_with_migration,
+    get_google_drive_unique_identifier,
 )
+from .base import (
+    check_duplicate_document,
+    get_current_timestamp,
+    safe_set_chunks,
+)
+
+
+async def _handle_existing_document_update(
+    session: AsyncSession,
+    existing_document: Document,
+    content_hash: str,
+    connector: dict | None,
+    filename: str,
+    primary_hash: str,
+    task_logger: TaskLoggingService,
+    log_entry,
+) -> tuple[bool, Document | None]:
+    """
+    Handle update logic for an existing document.
+
+    Returns:
+        Tuple of (should_skip_processing, document_to_return)
+    """
+    # Check if this document needs hash migration
+    if existing_document.unique_identifier_hash != primary_hash:
+        existing_document.unique_identifier_hash = primary_hash
+        logging.info(f"Migrated document to file_id-based identifier: {filename}")
+
+    # Check if content has changed
+    if existing_document.content_hash == content_hash:
+        # Content unchanged - check if we need to update metadata (e.g., filename changed)
+        if connector and connector.get("type") == DocumentType.GOOGLE_DRIVE_FILE:
+            connector_metadata = connector.get("metadata", {})
+            new_name = connector_metadata.get("google_drive_file_name")
+            # Check both possible keys for old name (FILE_NAME is used in stored documents)
+            doc_metadata = existing_document.document_metadata or {}
+            old_name = (
+                doc_metadata.get("FILE_NAME")
+                or doc_metadata.get("google_drive_file_name")
+                or doc_metadata.get("file_name")
+            )
+
+            if new_name and old_name and old_name != new_name:
+                # File was renamed - update title and metadata, skip expensive processing
+                from sqlalchemy.orm.attributes import flag_modified
+
+                existing_document.title = new_name
+                if not existing_document.document_metadata:
+                    existing_document.document_metadata = {}
+                existing_document.document_metadata["FILE_NAME"] = new_name
+                existing_document.document_metadata["file_name"] = new_name
+                existing_document.document_metadata["google_drive_file_name"] = new_name
+                flag_modified(existing_document, "document_metadata")
+                await session.commit()
+                logging.info(
+                    f"File renamed in Google Drive: '{old_name}' → '{new_name}' (no re-processing needed)"
+                )
+
+        await task_logger.log_task_success(
+            log_entry,
+            f"Markdown file document unchanged: {filename}",
+            {
+                "duplicate_detected": True,
+                "existing_document_id": existing_document.id,
+            },
+        )
+        logging.info(f"Document for markdown file {filename} unchanged. Skipping.")
+        return True, existing_document
+    else:
+        # Content has changed — guard against content_hash collision (same
+        # content already lives in a different document).
+        collision_doc = await check_duplicate_document(session, content_hash)
+        if collision_doc and collision_doc.id != existing_document.id:
+            logging.warning(
+                "Content-hash collision for markdown %s: identical content "
+                "exists in document #%s (%s). Skipping re-processing.",
+                filename,
+                collision_doc.id,
+                collision_doc.document_type,
+            )
+            if DocumentStatus.is_state(
+                existing_document.status, DocumentStatus.PENDING
+            ) or DocumentStatus.is_state(
+                existing_document.status, DocumentStatus.PROCESSING
+            ):
+                await session.delete(existing_document)
+                await session.commit()
+                return True, None
+
+            return True, existing_document
+
+        logging.info(
+            f"Content changed for markdown file {filename}. Updating document."
+        )
+        return False, None
 
 
 async def add_received_markdown_file_document(
     session: AsyncSession,
     file_name: str,
     file_in_markdown: str,
-    search_space_id: int,
+    workspace_id: int,
     user_id: str,
+    connector: dict | None = None,
 ) -> Document | None:
     """
     Process and store a markdown file document.
@@ -37,13 +132,14 @@ async def add_received_markdown_file_document(
         session: Database session
         file_name: Name of the markdown file
         file_in_markdown: Content of the markdown file
-        search_space_id: ID of the search space
+        workspace_id: ID of the workspace
         user_id: ID of the user
+        connector: Optional connector info for Google Drive files
 
     Returns:
         Document object if successful, None if failed
     """
-    task_logger = TaskLoggingService(session, search_space_id)
+    task_logger = TaskLoggingService(session, workspace_id)
 
     # Log task start
     log_entry = await task_logger.log_task_start(
@@ -58,67 +154,42 @@ async def add_received_markdown_file_document(
     )
 
     try:
-        # Generate unique identifier hash for this markdown file
-        unique_identifier_hash = generate_unique_identifier_hash(
-            DocumentType.FILE, file_name, search_space_id
+        # Generate unique identifier hash (uses file_id for Google Drive, filename for others)
+        primary_hash, legacy_hash = get_google_drive_unique_identifier(
+            connector, file_name, workspace_id
         )
 
         # Generate content hash
-        content_hash = generate_content_hash(file_in_markdown, search_space_id)
+        content_hash = generate_content_hash(file_in_markdown, workspace_id)
 
-        # Check if document with this unique identifier already exists
-        existing_document = await check_document_by_unique_identifier(
-            session, unique_identifier_hash
+        # Check if document exists (with migration support for Google Drive and content_hash fallback)
+        existing_document = await find_existing_document_with_migration(
+            session, primary_hash, legacy_hash, content_hash
         )
 
         if existing_document:
-            # Document exists - check if content has changed
-            if existing_document.content_hash == content_hash:
-                await task_logger.log_task_success(
-                    log_entry,
-                    f"Markdown file document unchanged: {file_name}",
-                    {
-                        "duplicate_detected": True,
-                        "existing_document_id": existing_document.id,
-                    },
-                )
-                logging.info(
-                    f"Document for markdown file {file_name} unchanged. Skipping."
-                )
-                return existing_document
-            else:
-                # Content has changed - update the existing document
-                logging.info(
-                    f"Content changed for markdown file {file_name}. Updating document."
-                )
-
-        # Get user's long context LLM (needed for both create and update)
-        user_llm = await get_user_long_context_llm(session, user_id, search_space_id)
-        if not user_llm:
-            raise RuntimeError(
-                f"No long context LLM configured for user {user_id} in search space {search_space_id}"
+            # Handle existing document (rename detection, content change check)
+            should_skip, doc = await _handle_existing_document_update(
+                session,
+                existing_document,
+                content_hash,
+                connector,
+                file_name,
+                primary_hash,
+                task_logger,
+                log_entry,
             )
+            if should_skip:
+                return doc
+            # Content changed - continue to update
 
-        # Generate summary with metadata
-        document_metadata = {
-            "file_name": file_name,
-            "document_type": "Markdown File Document",
-        }
-        summary_content, summary_embedding = await generate_document_summary(
-            file_in_markdown, user_llm, document_metadata
+        summary_content = (
+            f"File: {file_name}\n\n{truncate_for_embedding(file_in_markdown)}"
         )
+        summary_embedding = embed_text(summary_content)
 
         # Process chunks
         chunks = await create_document_chunks(file_in_markdown)
-
-        from app.utils.blocknote_converter import convert_markdown_to_blocknote
-
-        # Convert to BlockNote JSON
-        blocknote_json = await convert_markdown_to_blocknote(file_in_markdown)
-        if not blocknote_json:
-            logging.warning(
-                f"Failed to convert {file_name} to BlockNote JSON, document will not be editable"
-            )
 
         # Update or create document
         if existing_document:
@@ -130,19 +201,25 @@ async def add_received_markdown_file_document(
             existing_document.document_metadata = {
                 "FILE_NAME": file_name,
             }
-            existing_document.chunks = chunks
-            existing_document.blocknote_document = blocknote_json
+            await safe_set_chunks(session, existing_document, chunks)
+            existing_document.source_markdown = file_in_markdown
             existing_document.updated_at = get_current_timestamp()
+            existing_document.status = DocumentStatus.ready()  # Mark as ready
 
             await session.commit()
             await session.refresh(existing_document)
             document = existing_document
         else:
             # Create new document
+            # Determine document type based on connector
+            doc_type = DocumentType.FILE
+            if connector and connector.get("type") == DocumentType.GOOGLE_DRIVE_FILE:
+                doc_type = DocumentType.GOOGLE_DRIVE_FILE
+
             document = Document(
-                search_space_id=search_space_id,
+                workspace_id=workspace_id,
                 title=file_name,
-                document_type=DocumentType.FILE,
+                document_type=doc_type,
                 document_metadata={
                     "FILE_NAME": file_name,
                 },
@@ -150,9 +227,12 @@ async def add_received_markdown_file_document(
                 embedding=summary_embedding,
                 chunks=chunks,
                 content_hash=content_hash,
-                unique_identifier_hash=unique_identifier_hash,
-                blocknote_document=blocknote_json,
+                unique_identifier_hash=primary_hash,
+                source_markdown=file_in_markdown,
                 updated_at=get_current_timestamp(),
+                created_by_id=user_id,
+                connector_id=connector.get("connector_id") if connector else None,
+                status=DocumentStatus.ready(),  # Mark as ready
             )
 
             session.add(document)
@@ -174,6 +254,12 @@ async def add_received_markdown_file_document(
         return document
     except SQLAlchemyError as db_error:
         await session.rollback()
+        if "ix_documents_content_hash" in str(db_error):
+            logging.warning(
+                "content_hash collision during commit for %s (markdown). Skipping.",
+                file_name,
+            )
+            return None
         await task_logger.log_task_failure(
             log_entry,
             f"Database error processing markdown file: {file_name}",

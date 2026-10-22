@@ -2,6 +2,7 @@
 Base functionality and shared imports for connector indexers.
 """
 
+import contextlib
 import logging
 from datetime import UTC, datetime, timedelta
 
@@ -10,6 +11,8 @@ from sqlalchemy.future import select
 
 from app.db import (
     Document,
+    DocumentStatus,
+    DocumentType,
     SearchSourceConnector,
     SearchSourceConnectorType,
 )
@@ -26,6 +29,65 @@ def get_current_timestamp() -> datetime:
         Current datetime with UTC timezone
     """
     return datetime.now(UTC)
+
+
+async def safe_set_chunks(
+    session: "AsyncSession", document: Document, chunks: list
+) -> None:
+    """
+    Delete old chunks and assign new ones to a document.
+
+    This replaces direct ``document.chunks = chunks`` which triggers lazy
+    loading (and MissingGreenlet errors in async contexts).  It also
+    explicitly deletes pre-existing chunks so they don't accumulate across
+    repeated re-indexes — ``set_committed_value`` bypasses SQLAlchemy's
+    delete-orphan cascade.
+
+    Args:
+        session: The current async database session.
+        document: The Document object to update.
+        chunks: List of Chunk objects to assign.
+    """
+    from sqlalchemy import delete
+    from sqlalchemy.orm.attributes import set_committed_value
+
+    from app.db import Chunk
+
+    if document.id is not None:
+        await session.execute(delete(Chunk).where(Chunk.document_id == document.id))
+        for chunk in chunks:
+            chunk.document_id = document.id
+
+    set_committed_value(document, "chunks", chunks)
+    session.add_all(chunks)
+
+
+def parse_date_flexible(date_str: str) -> datetime:
+    """
+    Parse date from multiple common formats.
+
+    Args:
+        date_str: Date string to parse
+
+    Returns:
+        Parsed datetime object
+
+    Raises:
+        ValueError: If unable to parse the date string
+    """
+    formats = ["%Y-%m-%d", "%Y-%m-%dT%H:%M:%S"]
+
+    for fmt in formats:
+        try:
+            return datetime.strptime(date_str.rstrip("Z"), fmt)
+        except ValueError:
+            continue
+
+    # Try ISO format as fallback
+    try:
+        return datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+    except ValueError as err:
+        raise ValueError(f"Unable to parse date: {date_str}") from err
 
 
 async def check_duplicate_document_by_hash(
@@ -71,6 +133,59 @@ async def check_document_by_unique_identifier(
     return existing_doc_result.scalars().first()
 
 
+async def mark_connector_documents_failed(
+    session: AsyncSession,
+    *,
+    document_type: DocumentType,
+    workspace_id: int,
+    failures: list[tuple[str, str]],
+) -> int:
+    """Transition placeholder/in-progress documents to ``failed`` by source id.
+
+    Without this, a document whose download/ETL fails stays stuck in
+    ``pending``/``processing`` forever: undeletable in the UI and never retried.
+
+    ``failures`` is a list of ``(unique_id, reason)``. Best-effort: never raises,
+    and leaves ``ready`` documents untouched. Returns the number marked failed.
+    """
+    if not failures:
+        return 0
+
+    from app.indexing_pipeline.document_hashing import compute_identifier_hash
+
+    marked = 0
+    try:
+        for unique_id, reason in failures:
+            if not unique_id:
+                continue
+            uid_hash = compute_identifier_hash(
+                document_type.value, unique_id, workspace_id
+            )
+            existing = await check_document_by_unique_identifier(session, uid_hash)
+            if existing is None:
+                continue
+            if DocumentStatus.is_state(existing.status, DocumentStatus.READY):
+                continue
+            existing.status = DocumentStatus.failed(reason)
+            existing.updated_at = datetime.now(UTC)
+            marked += 1
+
+        if marked:
+            await session.commit()
+    except Exception:
+        with contextlib.suppress(Exception):
+            await session.rollback()
+        logger.warning(
+            "Failed to mark %d connector document(s) as failed (type=%s)",
+            len(failures),
+            getattr(document_type, "value", document_type),
+            exc_info=True,
+        )
+        return 0
+
+    return marked
+
+
 async def get_connector_by_id(
     session: AsyncSession, connector_id: int, connector_type: SearchSourceConnectorType
 ) -> SearchSourceConnector | None:
@@ -112,6 +227,13 @@ def calculate_date_range(
     Returns:
         Tuple of (start_date_str, end_date_str)
     """
+    # Normalize "undefined" strings to None (from frontend)
+    # This prevents parsing errors and ensures consistent behavior across all indexers
+    if start_date == "undefined" or start_date == "":
+        start_date = None
+    if end_date == "undefined" or end_date == "":
+        end_date = None
+
     if start_date is not None and end_date is not None:
         return start_date, end_date
 
@@ -151,6 +273,26 @@ def calculate_date_range(
         start_date if start_date else calculated_start_date.strftime("%Y-%m-%d")
     )
     end_date_str = end_date if end_date else calculated_end_date.strftime("%Y-%m-%d")
+
+    # FIX: Ensure end_date is at least 1 day after start_date to avoid
+    # "start_date must be strictly before end_date" errors when dates are the same
+    # (e.g., when last_indexed_at is today)
+    if start_date_str == end_date_str:
+        logger.info(
+            f"Start date ({start_date_str}) equals end date ({end_date_str}), "
+            "adjusting end date to next day to ensure valid date range"
+        )
+        # Parse end_date and add 1 day
+        try:
+            end_dt = parse_date_flexible(end_date_str)
+        except ValueError:
+            logger.warning(
+                f"Could not parse end_date '{end_date_str}', using current date"
+            )
+            end_dt = datetime.now()
+        end_dt = end_dt + timedelta(days=1)
+        end_date_str = end_dt.strftime("%Y-%m-%d")
+        logger.info(f"Adjusted end date to {end_date_str}")
 
     return start_date_str, end_date_str
 

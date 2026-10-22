@@ -3,25 +3,16 @@
 import logging
 from datetime import UTC, datetime
 
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.future import select
-from sqlalchemy.pool import NullPool
 
 from app.celery_app import celery_app
-from app.config import config
 from app.db import SearchSourceConnector, SearchSourceConnectorType
+from app.notifications.persistence import Notification
+from app.sunset import is_sunset_mode
+from app.tasks.celery_tasks import get_celery_session_maker, run_async_celery_task
+from app.utils.indexing_locks import is_connector_indexing_locked
 
 logger = logging.getLogger(__name__)
-
-
-def get_celery_session_maker():
-    """Create async session maker for Celery tasks."""
-    engine = create_async_engine(
-        config.DATABASE_URL,
-        poolclass=NullPool,
-        echo=False,
-    )
-    return async_sessionmaker(engine, expire_on_commit=False)
 
 
 @celery_app.task(name="check_periodic_schedules")
@@ -31,15 +22,9 @@ def check_periodic_schedules_task():
     This task runs every minute and triggers indexing for any connector
     whose next_scheduled_at time has passed.
     """
-    import asyncio
-
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-
-    try:
-        loop.run_until_complete(_check_and_trigger_schedules())
-    finally:
-        loop.close()
+    if is_sunset_mode():
+        return None
+    return run_async_celery_task(_check_and_trigger_schedules)
 
 
 async def _check_and_trigger_schedules():
@@ -62,57 +47,143 @@ async def _check_and_trigger_schedules():
 
             logger.info(f"Found {len(due_connectors)} connectors due for indexing")
 
-            # Import all indexing tasks
+            # Import indexing tasks for KB connectors only.
+            # Live connectors (Linear, Slack, Jira, ClickUp, Airtable, Discord,
+            # Teams, Gmail, Calendar, Luma) use real-time tools instead.
             from app.tasks.celery_tasks.connector_tasks import (
-                index_airtable_records_task,
-                index_clickup_tasks_task,
+                index_bookstack_pages_task,
                 index_confluence_pages_task,
-                index_crawled_urls_task,
-                index_discord_messages_task,
                 index_elasticsearch_documents_task,
                 index_github_repos_task,
-                index_google_calendar_events_task,
-                index_google_gmail_messages_task,
-                index_jira_issues_task,
-                index_linear_issues_task,
-                index_luma_events_task,
+                index_google_drive_files_task,
                 index_notion_pages_task,
-                index_slack_messages_task,
             )
 
-            # Map connector types to their tasks
             task_map = {
-                SearchSourceConnectorType.SLACK_CONNECTOR: index_slack_messages_task,
                 SearchSourceConnectorType.NOTION_CONNECTOR: index_notion_pages_task,
+                SearchSourceConnectorType.BOOKSTACK_CONNECTOR: index_bookstack_pages_task,
                 SearchSourceConnectorType.GITHUB_CONNECTOR: index_github_repos_task,
-                SearchSourceConnectorType.LINEAR_CONNECTOR: index_linear_issues_task,
-                SearchSourceConnectorType.JIRA_CONNECTOR: index_jira_issues_task,
                 SearchSourceConnectorType.CONFLUENCE_CONNECTOR: index_confluence_pages_task,
-                SearchSourceConnectorType.CLICKUP_CONNECTOR: index_clickup_tasks_task,
-                SearchSourceConnectorType.GOOGLE_CALENDAR_CONNECTOR: index_google_calendar_events_task,
-                SearchSourceConnectorType.AIRTABLE_CONNECTOR: index_airtable_records_task,
-                SearchSourceConnectorType.GOOGLE_GMAIL_CONNECTOR: index_google_gmail_messages_task,
-                SearchSourceConnectorType.DISCORD_CONNECTOR: index_discord_messages_task,
-                SearchSourceConnectorType.LUMA_CONNECTOR: index_luma_events_task,
                 SearchSourceConnectorType.ELASTICSEARCH_CONNECTOR: index_elasticsearch_documents_task,
-                SearchSourceConnectorType.WEBCRAWLER_CONNECTOR: index_crawled_urls_task,
+                SearchSourceConnectorType.GOOGLE_DRIVE_CONNECTOR: index_google_drive_files_task,
+                SearchSourceConnectorType.COMPOSIO_GOOGLE_DRIVE_CONNECTOR: index_google_drive_files_task,
             }
+
+            from app.services.mcp_oauth.registry import (
+                DEPRECATED_INDEXING_CONNECTOR_TYPES,
+                LIVE_CONNECTOR_TYPES,
+            )
+
+            # Disable obsolete periodic indexing in one batch: live connectors
+            # (now real-time agent tools) and deprecated-indexing connectors
+            # (KB is files/notes/uploads only) no longer index on a schedule.
+            live_disabled = []
+            for connector in due_connectors:
+                if (
+                    connector.connector_type in LIVE_CONNECTOR_TYPES
+                    or connector.connector_type in DEPRECATED_INDEXING_CONNECTOR_TYPES
+                ):
+                    connector.periodic_indexing_enabled = False
+                    connector.next_scheduled_at = None
+                    live_disabled.append(connector)
+            if live_disabled:
+                await session.commit()
+                for c in live_disabled:
+                    logger.info(
+                        "Disabled obsolete periodic indexing for connector %s (%s)",
+                        c.id,
+                        c.connector_type.value,
+                    )
 
             # Trigger indexing for each due connector
             for connector in due_connectors:
+                if connector in live_disabled:
+                    continue
+
+                # Primary guard: Redis lock indicates a task is currently running.
+                if is_connector_indexing_locked(connector.id):
+                    logger.info(
+                        f"Skipping periodic indexing for connector {connector.id} "
+                        "(Redis lock indicates indexing is already in progress)"
+                    )
+                    continue
+
+                # Skip scheduling if a sync for this connector is already in progress.
+                # This prevents duplicate tasks from piling up under slow/rate-limited providers.
+                in_progress_result = await session.execute(
+                    select(Notification.id).where(
+                        Notification.type == "connector_indexing",
+                        Notification.notification_metadata["connector_id"].astext
+                        == str(connector.id),
+                        Notification.notification_metadata["status"].astext
+                        == "in_progress",
+                    )
+                )
+                if in_progress_result.first():
+                    logger.info(
+                        f"Skipping periodic indexing for connector {connector.id} "
+                        "(already has in-progress indexing notification)"
+                    )
+                    continue
+
                 task = task_map.get(connector.connector_type)
                 if task:
                     logger.info(
                         f"Triggering periodic indexing for connector {connector.id} "
                         f"({connector.connector_type.value})"
                     )
-                    task.delay(
-                        connector.id,
-                        connector.search_space_id,
-                        str(connector.user_id),
-                        None,  # start_date - uses last_indexed_at
-                        None,  # end_date - uses now
-                    )
+
+                    # Special handling for Google Drive (native and Composio) - uses config for folder/file selection
+                    if connector.connector_type in [
+                        SearchSourceConnectorType.GOOGLE_DRIVE_CONNECTOR,
+                        SearchSourceConnectorType.COMPOSIO_GOOGLE_DRIVE_CONNECTOR,
+                    ]:
+                        connector_config = connector.config or {}
+                        selected_folders = connector_config.get("selected_folders", [])
+                        selected_files = connector_config.get("selected_files", [])
+                        indexing_options = connector_config.get(
+                            "indexing_options",
+                            {
+                                "max_files_per_folder": 100,
+                                "incremental_sync": True,
+                                "include_subfolders": True,
+                            },
+                        )
+
+                        if selected_folders or selected_files:
+                            task.delay(
+                                connector.id,
+                                connector.workspace_id,
+                                str(connector.user_id),
+                                {
+                                    "folders": selected_folders,
+                                    "files": selected_files,
+                                    "indexing_options": indexing_options,
+                                },
+                            )
+                        else:
+                            # No folders/files selected - skip indexing but still update next_scheduled_at
+                            # to prevent checking every minute
+                            logger.info(
+                                f"Google Drive connector {connector.id} has no folders or files selected, "
+                                "skipping periodic indexing (will check again at next scheduled time)"
+                            )
+                            from datetime import timedelta
+
+                            connector.next_scheduled_at = now + timedelta(
+                                minutes=connector.indexing_frequency_minutes
+                            )
+                            await session.commit()
+                            continue
+
+                    else:
+                        task.delay(
+                            connector.id,
+                            connector.workspace_id,
+                            str(connector.user_id),
+                            None,  # start_date - uses last_indexed_at
+                            None,  # end_date - uses now
+                        )
 
                     # Update next_scheduled_at for next run
                     from datetime import timedelta
